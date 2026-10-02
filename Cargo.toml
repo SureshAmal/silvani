@@ -1,0 +1,64 @@
+[package]
+name = "silvani"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = [
+    ".",
+    "crates/silvani-scraper",
+    "crates/silvani-player",
+    "crates/silvani-ui",
+    "crates/silvani-meta",
+]
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", features = ["json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+gpui-kit = "0.7.0"
+gpui-pre-reqwest-client = "0.3.7"
+silvani-scraper = { path = "crates/silvani-scraper" }
+silvani-player = { path = "crates/silvani-player" }
+silvani-ui = { path = "crates/silvani-ui" }
+silvani-meta = { path = "crates/silvani-meta" }
+
+[dependencies]
+silvani-scraper = { workspace = true }
+silvani-player = { workspace = true }
+silvani-ui = { workspace = true }
+silvani-meta = { workspace = true }
+gpui-kit = { workspace = true }
+gpui-pre-reqwest-client = { workspace = true }
+tokio = { workspace = true }
+futures = "0.3.34"
+
+[profile.dev]
+opt-level = 0
+debug = "limited"
+codegen-units = 16
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
