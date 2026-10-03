@@ -163,17 +163,41 @@ impl AnimeProvider for HiAnimeProvider {
                 .as_str()
                 .ok_or_else(|| ScraperError::Parse("Missing HTML in server response".into()))?;
 
-            let re_hash = Regex::new(&format!(
-                r#"data-type="{mode_str}"\s*data-server-name="ZokoAnime"\s*data-hash="([^"]*)""#
-            ))
-            .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let server_item_re = Regex::new(r#"<div[^>]*class="[^"]*server-item[^"]*"[^>]*>"#)
+                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let attr_type_re = Regex::new(r#"data-type="([^"]*)""#)
+                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let attr_hash_re = Regex::new(r#"data-hash="([^"]*)""#)
+                .map_err(|e| ScraperError::Parse(e.to_string()))?;
 
-            let hash_cap = re_hash
-                .captures(html)
-                .ok_or_else(|| ScraperError::NotFound(format!("ZokoAnime server not found for {mode_str}")))?;
+            let mut servers: Vec<(String, String)> = Vec::new();
+            for cap in server_item_re.find_iter(html) {
+                let tag = cap.as_str();
+                if let Some(h) = attr_hash_re.captures(tag) {
+                    let stype = attr_type_re
+                        .captures(tag)
+                        .map(|c| c[1].to_string())
+                        .unwrap_or_else(|| "sub".to_string());
+                    servers.push((stype, h[1].to_string()));
+                }
+            }
+
+            // Find requested audio mode first, or gracefully fall back to available server (e.g. sub)
+            let (actual_mode, hash_str) = servers
+                .iter()
+                .find(|(t, _)| t == mode_str)
+                .or_else(|| servers.first())
+                .cloned()
+                .ok_or_else(|| ScraperError::NotFound(format!("No streaming server found for episode {episode_id}")))?;
+
+            let actual_audio = if actual_mode == "dub" {
+                AudioType::Dub
+            } else {
+                AudioType::Sub
+            };
 
             let embed_url_bytes = base64::engine::general_purpose::STANDARD
-                .decode(&hash_cap[1])
+                .decode(&hash_str)
                 .map_err(|e| ScraperError::Crypto(e.to_string()))?;
 
             let embed_url = String::from_utf8(embed_url_bytes)
@@ -206,10 +230,15 @@ impl AnimeProvider for HiAnimeProvider {
                 })
                 .collect();
 
+            let is_dub = actual_audio == AudioType::Dub;
             Ok(StreamSource {
                 provider: self.name().to_string(),
-                audio_type: audio,
-                language: "Japanese".to_string(),
+                audio_type: actual_audio,
+                language: if is_dub {
+                    "English".to_string()
+                } else {
+                    "Japanese".to_string()
+                },
                 streams: vec![VideoStream {
                     quality: "auto".to_string(),
                     url: payload.src,

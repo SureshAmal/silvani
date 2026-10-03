@@ -52,6 +52,7 @@ pub struct DetailsView {
     episodes_per_page: usize,
     watch_history: WatchHistoryManager,
     image_cache: Arc<ImageCacheManager>,
+    available_providers: Vec<(String, String)>,
     on_back: ClickHandler,
     on_play_episode: PlayHandler,
     on_select_season: SeasonHandler,
@@ -87,6 +88,7 @@ impl DetailsView {
             episodes_per_page: 48,
             watch_history,
             image_cache,
+            available_providers: Vec::new(),
             on_back: None,
             on_play_episode: None,
             on_select_season: None,
@@ -95,6 +97,11 @@ impl DetailsView {
             on_provider_change: None,
             on_resolution_change: None,
         }
+    }
+
+    pub fn available_providers(mut self, providers: Vec<(String, String)>) -> Self {
+        self.available_providers = providers;
+        self
     }
 
     pub fn on_back(
@@ -319,7 +326,8 @@ impl RenderOnce for DetailsView {
                     self.selected_audio.clone(),
                     self.selected_provider.clone(),
                     self.selected_resolution.clone(),
-                );
+                )
+                .providers(self.available_providers.clone());
                 if let Some(h) = self.on_audio_change {
                     bar = bar.on_audio_change(move |audio, win, cx| h(audio, win, cx));
                 }

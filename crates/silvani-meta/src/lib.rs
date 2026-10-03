@@ -10,6 +10,7 @@ pub use image_cache::ImageCacheManager;
 pub use models::{AnimeItem, AnimeTitle, DashboardData, RelatedAnime};
 pub use providers::anilist::AniListProvider;
 pub use providers::jikan::JikanProvider;
+pub use providers::kitsu::KitsuProvider;
 
 #[cfg(test)]
 mod tests {
@@ -24,6 +25,16 @@ mod tests {
         assert!(!data.trending.is_empty());
         assert!(!data.upcoming.is_empty());
         assert!(!data.top_rated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_kitsu_provider() {
+        let provider = KitsuProvider::new();
+        let items = provider.search("Naruto", 2).await;
+        assert!(items.is_ok());
+        let items = items.unwrap();
+        assert!(!items.is_empty());
+        assert!(items[0].display_title().to_lowercase().contains("naruto"));
     }
 
     #[tokio::test]

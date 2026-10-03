@@ -152,16 +152,12 @@ impl RenderOnce for SettingsView {
                                 h_flex()
                                     .flex_wrap()
                                     .gap_2()
-                                    .children([
-                                        ("hianime", "HiAnime"),
-                                        ("gogoanime", "GogoAnime"),
-                                        ("animeworldindia", "AnimeWorld India (HI)"),
-                                        ("desidubanime", "DesiDub Anime (HI)"),
-                                        ("muse_india", "Muse India (YT)"),
-                                    ].into_iter().map(|(id, name)| {
+                                    .children(self.settings.providers.iter().filter(|p| p.enabled).map(|p| {
+                                        let id = p.id.clone();
+                                        let name = p.name.clone();
                                         let is_sel = self.settings.default_provider == id;
                                         let mut new_s = self.settings.clone();
-                                        new_s.default_provider = id.to_string();
+                                        new_s.default_provider = id.clone();
                                         let cb = on_update.clone();
                                         Button::new(format!("set-prov-{}", id))
                                             .small()

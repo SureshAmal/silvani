@@ -19,6 +19,8 @@ impl Default for AniListProvider {
 impl AniListProvider {
     pub fn new() -> Self {
         let client = Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(10)
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| Client::new());
@@ -60,9 +62,9 @@ impl AniListProvider {
             native: node["title"]["native"].as_str().map(|s| s.to_string()),
         };
 
-        let cover_image = node["coverImage"]["extraLarge"]
+        let cover_image = node["coverImage"]["large"]
             .as_str()
-            .or_else(|| node["coverImage"]["large"].as_str())
+            .or_else(|| node["coverImage"]["extraLarge"].as_str())
             .map(|s| s.to_string());
 
         let thumbnail_image = node["coverImage"]["large"]
@@ -173,40 +175,28 @@ impl AniListProvider {
             media(type: ANIME, sort: TRENDING_DESC) {
               id idMal title { english romaji native }
               coverImage { extraLarge large color }
-              bannerImage averageScore episodes season seasonYear format status genres
-              description(asHtml: false)
-              studios(isMain: true) { nodes { name } }
-              nextAiringEpisode { episode airingAt }
+              averageScore season seasonYear format status genres
             }
           }
           popular: Page(page: 1, perPage: $perPage) {
             media(type: ANIME, status: RELEASING, sort: POPULARITY_DESC) {
               id idMal title { english romaji native }
               coverImage { extraLarge large color }
-              bannerImage averageScore episodes season seasonYear format status genres
-              description(asHtml: false)
-              studios(isMain: true) { nodes { name } }
-              nextAiringEpisode { episode airingAt }
+              averageScore season seasonYear format status genres
             }
           }
           upcoming: Page(page: 1, perPage: $perPage) {
             media(type: ANIME, status: NOT_YET_RELEASED, sort: POPULARITY_DESC) {
               id idMal title { english romaji native }
               coverImage { extraLarge large color }
-              bannerImage averageScore episodes season seasonYear format status genres
-              description(asHtml: false)
-              studios(isMain: true) { nodes { name } }
-              nextAiringEpisode { episode airingAt }
+              averageScore season seasonYear format status genres
             }
           }
           top: Page(page: 1, perPage: $perPage) {
             media(type: ANIME, sort: SCORE_DESC) {
               id idMal title { english romaji native }
               coverImage { extraLarge large color }
-              bannerImage averageScore episodes season seasonYear format status genres
-              description(asHtml: false)
-              studios(isMain: true) { nodes { name } }
-              nextAiringEpisode { episode airingAt }
+              averageScore season seasonYear format status genres
             }
           }
         }

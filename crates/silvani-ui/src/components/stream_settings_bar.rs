@@ -25,16 +25,6 @@ impl SelectedAudio {
     }
 }
 
-pub const AVAILABLE_PROVIDERS: [(&str, &str); 7] = [
-    ("hianime", "HiAnime"),
-    ("gogoanime", "GogoAnime"),
-    ("animeonsen", "AnimeOnsen"),
-    ("animeworldindia", "AnimeWorld (HI)"),
-    ("desidubanime", "DesiDub (HI)"),
-    ("muse_india", "Muse India (YT)"),
-    ("ani_one_asia", "Ani-One Asia (YT)"),
-];
-
 pub const AVAILABLE_RESOLUTIONS: [&str; 4] = ["1080p", "720p", "480p", "Auto"];
 
 pub type AudioChangeHandler = Option<Rc<dyn Fn(&SelectedAudio, &mut Window, &mut App)>>;
@@ -47,6 +37,7 @@ pub struct StreamSettingsBar {
     selected_audio: SelectedAudio,
     selected_provider: String,
     selected_resolution: String,
+    providers: Vec<(String, String)>,
     on_audio_change: AudioChangeHandler,
     on_provider_change: ProviderChangeHandler,
     on_resolution_change: ResolutionChangeHandler,
@@ -64,10 +55,16 @@ impl StreamSettingsBar {
             selected_audio,
             selected_provider: selected_provider.into(),
             selected_resolution: selected_resolution.into(),
+            providers: Vec::new(),
             on_audio_change: None,
             on_provider_change: None,
             on_resolution_change: None,
         }
+    }
+
+    pub fn providers(mut self, providers: Vec<(String, String)>) -> Self {
+        self.providers = providers;
+        self
     }
 
     pub fn on_audio_change(
@@ -203,16 +200,17 @@ impl RenderOnce for StreamSettingsBar {
                             .text_color(theme.muted_foreground)
                             .flex_shrink_0(),
                     )
-                    .children(AVAILABLE_PROVIDERS.iter().map(|&(prov_key, prov_name)| {
+                    .children(self.providers.iter().map(|(prov_key, prov_name)| {
                         let cb = prov_cb.clone();
+                        let prov_key_c = prov_key.clone();
                         let is_active = self.selected_provider.eq_ignore_ascii_case(prov_key);
                         Button::new(format!("prov-{}", prov_key))
                             .small()
-                            .label(prov_name)
+                            .label(prov_name.clone())
                             .when(is_active, |b| b.primary())
                             .when(!is_active, |b| b.outline())
                             .when_some(cb, move |b, h| {
-                                b.on_click(move |_ev, win, cx| h(prov_key, win, cx))
+                                b.on_click(move |_ev, win, cx| h(&prov_key_c, win, cx))
                             })
                     }))
                     .child(

@@ -47,6 +47,8 @@ impl ImageCacheManager {
         let _ = std::fs::create_dir_all(&cache_dir);
 
         let client = Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(24)
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| Client::new());

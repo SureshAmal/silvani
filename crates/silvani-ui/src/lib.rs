@@ -95,8 +95,21 @@ impl SearchView {
             }
         });
 
-        let meta_client = Arc::new(AnimeMetadataClient::new().expect("Failed to init metadata client"));
-        let scraper_engine = Arc::new(ScraperEngine::new().expect("Failed to init scraper engine"));
+        let cache_dir = settings::config_dir().join("cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let meta_db = cache_dir.join("meta.db");
+        let scraper_db = cache_dir.join("scraper.db");
+
+        let meta_client = Arc::new(
+            AnimeMetadataClient::with_cache_file(meta_db.to_str().unwrap_or(""))
+                .or_else(|_| AnimeMetadataClient::new())
+                .expect("Failed to init metadata client"),
+        );
+        let scraper_engine = Arc::new(
+            ScraperEngine::with_cache_file(scraper_db.to_str().unwrap_or(""))
+                .or_else(|_| ScraperEngine::new())
+                .expect("Failed to init scraper engine"),
+        );
         let stream_service = Arc::new(AnimeStreamService::new(scraper_engine));
         let player: Arc<dyn MediaPlayer> = Arc::new(MpvPlayer);
         let image_cache = Arc::new(ImageCacheManager::new());
@@ -182,7 +195,7 @@ impl SearchView {
                     AnimeCategory::SearchResults(_) => self.search(window, cx),
                     AnimeCategory::Genre(genre) => {
                         let g = genre.clone();
-                        self.select_category(AnimeCategory::Genre(g), window, cx);
+                        self.fetch_genre(&g, window, cx);
                     }
                     _ => self.load_dashboard(window, cx),
                 }
@@ -306,11 +319,8 @@ impl SearchView {
         self.current_category = category.clone();
 
         if is_same {
-            self.reload(window, cx);
             return;
         }
-
-        let cache = Arc::clone(&self.image_cache);
 
         match category {
             AnimeCategory::Trending => {
@@ -347,32 +357,37 @@ impl SearchView {
             }
             AnimeCategory::History => {}
             AnimeCategory::Genre(genre) => {
-                self.is_loading = true;
-                cx.notify();
-
-                let client = Arc::clone(&self.meta_client);
-                let g = genre.clone();
-                cx.spawn_in(window, async move |this, cx| {
-                    let items = client.get_by_genre(&g, 1, 24).await.unwrap_or_default();
-                    let items_c = items.clone();
-                    this.update_in(cx, |this, window, cx| {
-                        this.current_items = items;
-                        this.is_loading = false;
-                        cx.notify();
-
-                        let prefetch_task = cache.prefetch_covers(&items_c);
-                        cx.spawn_in(window, async move |this, cx| {
-                            let _ = prefetch_task.await;
-                            this.update_in(cx, |_this, _window, cx| {
-                                cx.notify();
-                            }).ok();
-                        }).detach();
-                    }).ok();
-                }).detach();
+                self.fetch_genre(&genre, window, cx);
             }
             AnimeCategory::SearchResults(_) => {}
             AnimeCategory::Settings => {}
         }
+    }
+
+    pub fn fetch_genre(&mut self, genre: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_loading = true;
+        cx.notify();
+
+        let client = Arc::clone(&self.meta_client);
+        let cache = Arc::clone(&self.image_cache);
+        let g = genre.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let items = client.get_by_genre(&g, 1, 24).await.unwrap_or_default();
+            let items_c = items.clone();
+            this.update_in(cx, |this, window, cx| {
+                this.current_items = items;
+                this.is_loading = false;
+                cx.notify();
+
+                let prefetch_task = cache.prefetch_covers(&items_c);
+                cx.spawn_in(window, async move |this, cx| {
+                    let _ = prefetch_task.await;
+                    this.update_in(cx, |_this, _window, cx| {
+                        cx.notify();
+                    }).ok();
+                }).detach();
+            }).ok();
+        }).detach();
     }
 
     pub fn search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,11 +541,7 @@ impl SearchView {
         let anime_id = item.id.clone();
         let has_relations = !item.relations.is_empty();
 
-        let default_prov = if self.app_settings.default_provider.is_empty() {
-            "hianime".to_string()
-        } else {
-            self.app_settings.default_provider.clone()
-        };
+        let default_prov = self.app_settings.get_default_provider();
         let default_aud = match self.app_settings.default_audio.to_lowercase().as_str() {
             "dub" => SelectedAudio::Dub,
             "hindi" | "hindidub" => SelectedAudio::Hindi,
@@ -749,6 +760,7 @@ impl Render for SearchView {
                     self.watch_history.clone(),
                     Arc::clone(&self.image_cache),
                 )
+                .available_providers(self.app_settings.enabled_providers())
                 .on_back(cx.listener(|this, _, _window, cx| {
                     this.current_page = CurrentPage::Browse;
                     cx.notify();
@@ -810,12 +822,13 @@ impl Render for SearchView {
                         let ep = hist_item.episode_number;
                         let aid = hist_item.anime_id.clone();
                         let cover = hist_item.cover_image.clone();
+                        let default_prov = this.app_settings.get_default_provider();
                         this.play_episode(
                             &aid,
                             &title,
                             ep,
                             None,
-                            "hianime",
+                            &default_prov,
                             AudioType::Sub,
                             "1080p",
                             cover,

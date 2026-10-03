@@ -6,6 +6,29 @@ use gpui_kit::{App, SharedString};
 use gpui_kit::component::{Theme, ThemeConfig, ThemeRegistry};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderSetting {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_providers() -> Vec<ProviderSetting> {
+    vec![
+        ProviderSetting { id: "hianime".to_string(), name: "HiAnime".to_string(), enabled: true },
+        ProviderSetting { id: "gogoanime".to_string(), name: "GogoAnime".to_string(), enabled: true },
+        ProviderSetting { id: "muse_india".to_string(), name: "Muse India (YT)".to_string(), enabled: true },
+        ProviderSetting { id: "ani_one_asia".to_string(), name: "Ani-One Asia (YT)".to_string(), enabled: true },
+        ProviderSetting { id: "animeworldindia".to_string(), name: "AnimeWorld India (HI)".to_string(), enabled: true },
+        ProviderSetting { id: "desidubanime".to_string(), name: "DesiDub Anime (HI)".to_string(), enabled: true },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: String,
@@ -13,6 +36,8 @@ pub struct AppSettings {
     pub default_provider: String,
     pub default_audio: String,
     pub default_resolution: String,
+    #[serde(default = "default_providers")]
+    pub providers: Vec<ProviderSetting>,
 }
 
 impl Default for AppSettings {
@@ -23,6 +48,27 @@ impl Default for AppSettings {
             default_provider: "hianime".to_string(),
             default_audio: "sub".to_string(),
             default_resolution: "1080p".to_string(),
+            providers: default_providers(),
+        }
+    }
+}
+
+impl AppSettings {
+    pub fn enabled_providers(&self) -> Vec<(String, String)> {
+        self.providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
+    }
+
+    pub fn get_default_provider(&self) -> String {
+        if self.providers.iter().any(|p| p.enabled && p.id == self.default_provider) {
+            self.default_provider.clone()
+        } else if let Some(first) = self.providers.iter().find(|p| p.enabled) {
+            first.id.clone()
+        } else {
+            "hianime".to_string()
         }
     }
 }
