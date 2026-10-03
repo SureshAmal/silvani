@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
+use gpui_kit::component::Icon;
 use gpui_kit::component::label::Label;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
@@ -57,6 +59,36 @@ impl RenderOnce for AnimeCard {
             _ => self.item.cover_image.as_ref().map(|url| ImageSource::from(url.clone())),
         };
 
+        let cover_element = match image_source {
+            Some(src) => img(src)
+                .w_full()
+                .h_64()
+                .rounded(theme.radius)
+                .object_fit(ObjectFit::Cover)
+                .flex_shrink_0()
+                .into_any_element(),
+            None => v_flex()
+                .w_full()
+                .h_64()
+                .rounded(theme.radius)
+                .bg(theme.muted)
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .flex_shrink_0()
+                .child(
+                    Icon::new(IconName::File)
+                        .size_8()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Label::new("No Image")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .into_any_element(),
+        };
+
         v_flex()
             .id(self.id)
             .w_48()
@@ -71,16 +103,7 @@ impl RenderOnce for AnimeCard {
             .when_some(self.on_click, |d, cb| {
                 d.on_click(move |ev, win, cx| cb(ev, win, cx))
             })
-            .when_some(image_source, |d, src| {
-                d.child(
-                    img(src)
-                        .w_full()
-                        .h_64()
-                        .rounded(theme.radius)
-                        .object_fit(ObjectFit::Cover)
-                        .flex_shrink_0(),
-                )
-            })
+            .child(cover_element)
             .child(
                 Label::new(title)
                     .text_sm()

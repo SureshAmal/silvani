@@ -187,6 +187,26 @@ impl ScraperEngine {
             .unwrap_or_default()
     }
 
+    /// Targeted Search: Searches only the specified provider with caching
+    pub async fn search_provider(&self, provider_name: &str, query: &str) -> Vec<AnimeSearchResult> {
+        let provider = match self.providers.iter().find(|p| provider_matches(p.name(), provider_name)) {
+            Some(p) => Arc::clone(p),
+            None => return Vec::new(),
+        };
+
+        let prov_key = provider.name();
+        if let Some(cached) = self.cache.get_search(query, prov_key, 3600) {
+            return cached;
+        }
+
+        if let Ok(results) = provider.search(query).await {
+            let _ = self.cache.set_search(query, prov_key, &results);
+            results
+        } else {
+            Vec::new()
+        }
+    }
+
     /// High-level API: Fetch episode list for anime on specific provider
     pub async fn episodes(&self, provider_name: &str, anime_id: &str) -> Result<Vec<Episode>> {
         let provider = self

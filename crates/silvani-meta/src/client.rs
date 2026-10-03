@@ -47,9 +47,9 @@ impl AnimeMetadataClient {
                 return Ok(cached);
             }
 
-        let result = match self.anilist.fetch_dashboard(per_page).await {
+        let result = match self.kitsu.fetch_dashboard(per_page).await {
             Ok(data) => data,
-            Err(_) => match self.kitsu.fetch_dashboard(per_page).await {
+            Err(_) => match self.anilist.fetch_dashboard(per_page).await {
                 Ok(data) => data,
                 Err(_) => self.jikan.fetch_dashboard(per_page).await?,
             },
@@ -69,9 +69,9 @@ impl AnimeMetadataClient {
                 return Ok(cached);
             }
 
-        let result = match self.anilist.search(query, page, per_page).await {
+        let result = match self.kitsu.search(query, per_page).await {
             Ok(items) if !items.is_empty() => items,
-            _ => match self.kitsu.search(query, per_page).await {
+            _ => match self.anilist.search(query, page, per_page).await {
                 Ok(items) if !items.is_empty() => items,
                 _ => self.jikan.search(query, per_page).await?,
             },
@@ -91,9 +91,9 @@ impl AnimeMetadataClient {
                 return Ok(cached);
             }
 
-        let result = match self.anilist.fetch_by_genre(genre, page, per_page).await {
+        let result = match self.kitsu.fetch_by_genre(genre, per_page).await {
             Ok(items) if !items.is_empty() => items,
-            _ => self.kitsu.fetch_by_genre(genre, per_page).await.unwrap_or_default(),
+            _ => self.anilist.fetch_by_genre(genre, page, per_page).await.unwrap_or_default(),
         };
 
         if let Ok(serialized) = serde_json::to_string(&result) {

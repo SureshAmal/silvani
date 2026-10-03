@@ -37,21 +37,9 @@ impl AnimeStreamService {
             _ => title.to_string(),
         };
 
-        let results = self.engine.search(&search_query).await;
+        let results = self.engine.search_provider(provider, &search_query).await;
 
         let target = results.into_iter().find(|r| {
-            let matches_prov = match provider {
-                "animeworldindia" | "animeworld_india" => {
-                    r.provider == "animeworldindia" || r.provider == "animeworld_india"
-                }
-                "desidubanime" | "desidub" => {
-                    r.provider == "desidubanime" || r.provider == "desidub"
-                }
-                p => r.provider.eq_ignore_ascii_case(p),
-            };
-            if !matches_prov {
-                return false;
-            }
             if audio == AudioType::Dub && provider == "gogoanime" {
                 r.title.to_lowercase().contains("dub")
             } else {

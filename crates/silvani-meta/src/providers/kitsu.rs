@@ -140,7 +140,8 @@ impl KitsuProvider {
     }
 
     pub async fn fetch_trending(&self, limit: u32) -> Result<Vec<AnimeItem>> {
-        let endpoint = format!("/trending/anime?limit={}", limit);
+        let lim = limit.min(20);
+        let endpoint = format!("/trending/anime?limit={}", lim);
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
             .as_array()
@@ -150,7 +151,8 @@ impl KitsuProvider {
     }
 
     pub async fn fetch_popular(&self, limit: u32) -> Result<Vec<AnimeItem>> {
-        let endpoint = format!("/anime?page[limit]={}&sort=-user_count", limit);
+        let lim = limit.min(20);
+        let endpoint = format!("/anime?page[limit]={}&sort=-user_count", lim);
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
             .as_array()
@@ -160,9 +162,10 @@ impl KitsuProvider {
     }
 
     pub async fn fetch_upcoming(&self, limit: u32) -> Result<Vec<AnimeItem>> {
+        let lim = limit.min(20);
         let endpoint = format!(
             "/anime?page[limit]={}&filter[status]=unreleased&sort=-user_count",
-            limit
+            lim
         );
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
@@ -173,7 +176,8 @@ impl KitsuProvider {
     }
 
     pub async fn fetch_top(&self, limit: u32) -> Result<Vec<AnimeItem>> {
-        let endpoint = format!("/anime?page[limit]={}&sort=-average_rating", limit);
+        let lim = limit.min(20);
+        let endpoint = format!("/anime?page[limit]={}&sort=-average_rating", lim);
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
             .as_array()
@@ -183,8 +187,9 @@ impl KitsuProvider {
     }
 
     pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<AnimeItem>> {
+        let lim = limit.min(20);
         let encoded = Self::url_encode(query);
-        let endpoint = format!("/anime?page[limit]={}&filter[text]={}", limit, encoded);
+        let endpoint = format!("/anime?page[limit]={}&filter[text]={}", lim, encoded);
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
             .as_array()
@@ -194,8 +199,9 @@ impl KitsuProvider {
     }
 
     pub async fn fetch_by_genre(&self, genre: &str, limit: u32) -> Result<Vec<AnimeItem>> {
+        let lim = limit.min(20);
         let encoded = Self::url_encode(&genre.to_lowercase());
-        let endpoint = format!("/anime?page[limit]={}&filter[categories]={}", limit, encoded);
+        let endpoint = format!("/anime?page[limit]={}&filter[categories]={}", lim, encoded);
         let json = self.get_json(&endpoint).await?;
         let items = json["data"]
             .as_array()
