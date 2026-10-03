@@ -84,6 +84,10 @@ impl ScraperEngine {
         self.providers.push(provider);
     }
 
+    pub fn clear_cache(&self) {
+        let _ = self.cache.clear();
+    }
+
     /// Reactive Streaming API: Pushes results immediately as each provider finishes.
     /// UI pulls from Receiver in real-time without waiting for other providers.
     pub fn search_stream(&self, query: &str) -> mpsc::Receiver<Vec<AnimeSearchResult>> {

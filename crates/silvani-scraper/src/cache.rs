@@ -126,4 +126,18 @@ impl CacheStore {
         .map_err(|e| ScraperError::Parse(e.to_string()))?;
         Ok(())
     }
+
+    pub fn clear(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("DELETE FROM search_cache; DELETE FROM stream_cache;")
+            .map_err(|e| ScraperError::Parse(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn delete_search(&self, query: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM search_cache WHERE query = ?1", params![query])
+            .map_err(|e| ScraperError::Parse(e.to_string()))?;
+        Ok(())
+    }
 }

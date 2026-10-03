@@ -105,7 +105,7 @@ impl RenderOnce for HistoryView {
                     v_flex()
                         .items_center()
                         .justify_center()
-                        .h(px(300.))
+                        .h_72()
                         .gap_2()
                         .child(
                             Label::new("No watch history yet.")
@@ -140,6 +140,12 @@ impl RenderOnce for HistoryView {
                                             Tag::primary()
                                                 .child(format!("EP {}", item.episode_number)),
                                         )
+                                        .when(item.completed || item.progress_percent >= 85.0, |d| {
+                                            d.child(Tag::success().child("Watched ✓"))
+                                        })
+                                        .when(!item.completed && item.progress_percent >= 1.0, |d| {
+                                            d.child(Tag::secondary().child(format!("{:.0}%", item.progress_percent)))
+                                        })
                                         .child(
                                             v_flex()
                                                 .child(

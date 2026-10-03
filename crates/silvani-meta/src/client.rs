@@ -106,4 +106,12 @@ impl AnimeMetadataClient {
 
         Ok(result)
     }
+
+    pub fn clear_cache(&self) {
+        let _ = self.cache.clear();
+    }
+
+    pub fn delete_cache(&self, key: &str) {
+        let _ = self.cache.delete(key);
+    }
 }

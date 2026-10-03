@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -16,6 +17,7 @@ pub struct SearchBar {
     search_input: Entity<InputState>,
     on_search: ClickHandler,
     on_history: ClickHandler,
+    on_settings: ClickHandler,
 }
 
 impl SearchBar {
@@ -25,6 +27,7 @@ impl SearchBar {
             search_input: search_input.clone(),
             on_search: None,
             on_history: None,
+            on_settings: None,
         }
     }
 
@@ -41,6 +44,14 @@ impl SearchBar {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_history = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn on_settings(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_settings = Some(Rc::new(handler));
         self
     }
 }
@@ -75,9 +86,17 @@ impl RenderOnce for SearchBar {
             )
             .child(
                 Button::new("history-btn")
-                    .outline()
-                    .label("Watch History")
+                    .ghost()
+                    .icon(IconName::Clock)
                     .when_some(self.on_history, |b, cb| {
+                        b.on_click(move |ev, win, cx| cb(ev, win, cx))
+                    }),
+            )
+            .child(
+                Button::new("settings-btn")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .when_some(self.on_settings, |b, cb| {
                         b.on_click(move |ev, win, cx| cb(ev, win, cx))
                     }),
             )

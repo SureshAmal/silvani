@@ -17,6 +17,7 @@ pub enum AnimeCategory {
     Upcoming,
     TopRated,
     History,
+    Settings,
     Genre(String),
     SearchResults(String),
 }
@@ -75,7 +76,6 @@ impl RenderOnce for CategoryTabs {
             .child(make_btn("tab-season", "Popular Season", AnimeCategory::PopularSeason))
             .child(make_btn("tab-upcoming", "Upcoming", AnimeCategory::Upcoming))
             .child(make_btn("tab-top", "Top Rated", AnimeCategory::TopRated))
-            .child(make_btn("tab-history", "History", AnimeCategory::History))
             .children(DEFAULT_GENRES.iter().enumerate().map(|(idx, &genre)| {
                 let cat = AnimeCategory::Genre(genre.to_string());
                 let is_active = match &current {

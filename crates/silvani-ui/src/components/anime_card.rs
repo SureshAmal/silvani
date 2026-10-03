@@ -59,7 +59,7 @@ impl RenderOnce for AnimeCard {
 
         v_flex()
             .id(self.id)
-            .w(px(180.))
+            .w_48()
             .gap_2()
             .p_2()
             .rounded(theme.radius)
@@ -75,7 +75,7 @@ impl RenderOnce for AnimeCard {
                 d.child(
                     img(src)
                         .w_full()
-                        .h(px(245.))
+                        .h_64()
                         .rounded(theme.radius)
                         .object_fit(ObjectFit::Cover)
                         .flex_shrink_0(),

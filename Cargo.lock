@@ -6438,6 +6438,7 @@ name = "silvani-player"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "silvani-scraper",
 ]
 
@@ -6462,6 +6463,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "notify",
  "rusqlite",
  "serde",
  "serde_json",

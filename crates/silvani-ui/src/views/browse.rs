@@ -27,6 +27,7 @@ pub struct BrowseView {
     image_cache: Arc<ImageCacheManager>,
     on_search: ClickHandler,
     on_history: ClickHandler,
+    on_settings: ClickHandler,
     on_select_category: CategoryHandler,
     on_open_details: AnimeItemHandler,
 }
@@ -47,6 +48,7 @@ impl BrowseView {
             image_cache,
             on_search: None,
             on_history: None,
+            on_settings: None,
             on_select_category: None,
             on_open_details: None,
         }
@@ -65,6 +67,14 @@ impl BrowseView {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_history = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn on_settings(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_settings = Some(Rc::new(handler));
         self
     }
 
@@ -91,6 +101,7 @@ impl RenderOnce for BrowseView {
         let on_open = self.on_open_details.clone();
         let on_search = self.on_search.clone();
         let on_history = self.on_history.clone();
+        let on_settings = self.on_settings.clone();
         let on_select = self.on_select_category.clone();
         let image_cache = Arc::clone(&self.image_cache);
 
@@ -100,6 +111,9 @@ impl RenderOnce for BrowseView {
         }
         if let Some(h) = on_history {
             search_bar = search_bar.on_history(move |ev, win, cx| h(ev, win, cx));
+        }
+        if let Some(h) = on_settings {
+            search_bar = search_bar.on_settings(move |ev, win, cx| h(ev, win, cx));
         }
 
         let mut category_tabs = CategoryTabs::new("browse-category-tabs", self.current_category.clone());
@@ -128,8 +142,8 @@ impl RenderOnce for BrowseView {
                                 .gap_4()
                                 .children((0..12).map(|_| {
                                     Skeleton::new()
-                                        .w(px(180.))
-                                        .h(px(310.))
+                                        .w_48()
+                                        .h_72()
                                         .rounded_lg()
                                 })),
                         )
@@ -139,7 +153,7 @@ impl RenderOnce for BrowseView {
                             v_flex()
                                 .items_center()
                                 .justify_center()
-                                .h(px(300.))
+                                .h_72()
                                 .gap_2()
                                 .child(
                                     Label::new("No anime found.")

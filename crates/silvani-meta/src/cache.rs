@@ -75,4 +75,16 @@ impl MetaCache {
 
         Ok(())
     }
+
+    pub fn clear(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM metadata_cache", [])?;
+        Ok(())
+    }
+
+    pub fn delete(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM metadata_cache WHERE cache_key = ?", params![key])?;
+        Ok(())
+    }
 }

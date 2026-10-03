@@ -18,6 +18,10 @@ impl AnimeStreamService {
         &self.engine
     }
 
+    pub fn clear_cache(&self) {
+        self.engine.clear_cache();
+    }
+
     /// Finds and loads real episodes for a given title, provider, and audio language.
     /// Returns an empty list if no episodes exist on this provider for this audio.
     /// Never generates fake or placeholder episodes.

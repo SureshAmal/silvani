@@ -9,7 +9,7 @@ use gpui_kit::component::pagination::Pagination;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -250,8 +250,8 @@ impl RenderOnce for DetailsView {
                     .when_some(poster_source, |d, src| {
                         d.child(
                             img(src)
-                                .w(px(200.))
-                                .h(px(280.))
+                                .w_56()
+                                .h_72()
                                 .rounded(theme.radius)
                                 .object_fit(ObjectFit::Cover)
                                 .flex_shrink_0(),
@@ -363,7 +363,7 @@ impl RenderOnce for DetailsView {
                                 h_flex()
                                     .items_center()
                                     .gap_2()
-                                    .w(px(260.))
+                                    .w_64()
                                     .child(
                                         Input::new(&self.episode_search_input)
                                             .cleanable(true),
@@ -438,7 +438,7 @@ impl RenderOnce for DetailsView {
                             let prov = prov_name.clone();
                             let audio = cur_audio.clone();
                             let res = cur_res.clone();
-                            let is_watched = self.watch_history.is_watched(&self.item.id, ep_num);
+                            let progress = self.watch_history.get_progress(&self.item.id, ep_num);
                             let play_cb = on_play.clone();
 
                             EpisodeItem::new(
@@ -446,7 +446,7 @@ impl RenderOnce for DetailsView {
                                 ep_num,
                             )
                             .title(ep.title.clone())
-                            .is_watched(is_watched)
+                            .progress(progress)
                             .when_some(play_cb, move |item, handler| {
                                 let req = PlayEpisodeRequest {
                                     number: ep_num,

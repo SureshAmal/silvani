@@ -15,7 +15,7 @@ pub struct EpisodeItem {
     id: ElementId,
     number: f32,
     title: Option<String>,
-    is_watched: bool,
+    progress: Option<f32>,
     on_play: ClickHandler,
 }
 
@@ -25,7 +25,7 @@ impl EpisodeItem {
             id: id.into(),
             number,
             title: None,
-            is_watched: false,
+            progress: None,
             on_play: None,
         }
     }
@@ -35,8 +35,15 @@ impl EpisodeItem {
         self
     }
 
+    pub fn progress(mut self, progress: Option<f32>) -> Self {
+        self.progress = progress;
+        self
+    }
+
     pub fn is_watched(mut self, watched: bool) -> Self {
-        self.is_watched = watched;
+        if watched {
+            self.progress = Some(100.0);
+        }
         self
     }
 
@@ -54,6 +61,7 @@ impl RenderOnce for EpisodeItem {
         let theme = cx.theme();
         let ep_num_label = format!("EP {}", self.number);
         let ep_title = self.title.unwrap_or_else(|| format!("Episode {}", self.number));
+        let is_completed = self.progress.is_some_and(|p| p >= 85.0);
 
         h_flex()
             .id(self.id)
@@ -61,13 +69,13 @@ impl RenderOnce for EpisodeItem {
             .justify_between()
             .p_2()
             .rounded_md()
-            .bg(if self.is_watched { theme.secondary.opacity(0.6) } else { theme.secondary })
+            .bg(if is_completed { theme.secondary.opacity(0.6) } else { theme.secondary })
             .border_1()
-            .border_color(if self.is_watched { theme.primary.opacity(0.3) } else { theme.border })
+            .border_color(if is_completed { theme.primary.opacity(0.3) } else { theme.border })
             .hover(|s| s.border_color(theme.primary).bg(theme.accent))
             .cursor_pointer()
             .gap_2()
-            .w(px(280.))
+            .w_72()
             .when_some(self.on_play, |d, cb| {
                 d.on_click(move |ev, win, cx| cb(ev, win, cx))
             })
@@ -92,10 +100,21 @@ impl RenderOnce for EpisodeItem {
                     .items_center()
                     .gap_1()
                     .flex_shrink_0()
-                    .when(self.is_watched, |d| {
-                        d.child(Tag::success().child("Watched ✓"))
+                    .when_some(self.progress, |d, p| {
+                        if p >= 85.0 {
+                            d.child(Tag::success().child("Watched ✓"))
+                        } else if p >= 1.0 {
+                            d.child(Tag::secondary().child(format!("{:.0}%", p)))
+                        } else {
+                            d.child(
+                                Button::new("play-btn")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Play),
+                            )
+                        }
                     })
-                    .when(!self.is_watched, |d| {
+                    .when(self.progress.is_none(), |d| {
                         d.child(
                             Button::new("play-btn")
                                 .ghost()
