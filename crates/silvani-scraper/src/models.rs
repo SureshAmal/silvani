@@ -1,9 +1,29 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum AudioType {
+    #[default]
     Sub,
     Dub,
+    Hindi,
+}
+
+impl AudioType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sub => "sub",
+            Self::Dub => "dub",
+            Self::Hindi => "hindi",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Sub => "Sub",
+            Self::Dub => "Dub",
+            Self::Hindi => "Hindi Dub",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

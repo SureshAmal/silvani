@@ -1,11 +1,13 @@
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ScraperError {
     Network(String),
     Parse(String),
     NotFound(String),
     Crypto(String),
+    CloudflareBlocked(String),
+    Timeout(String),
 }
 
 impl fmt::Display for ScraperError {
@@ -15,6 +17,8 @@ impl fmt::Display for ScraperError {
             Self::Parse(msg) => write!(f, "Parse error: {msg}"),
             Self::NotFound(msg) => write!(f, "Not found: {msg}"),
             Self::Crypto(msg) => write!(f, "Crypto error: {msg}"),
+            Self::CloudflareBlocked(msg) => write!(f, "Cloudflare challenge/block: {msg}"),
+            Self::Timeout(msg) => write!(f, "Operation timed out: {msg}"),
         }
     }
 }

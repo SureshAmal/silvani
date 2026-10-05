@@ -1,11 +1,11 @@
 use serde::Deserialize;
 
 use crate::error::{Result, ScraperError};
+use crate::http::ScraperHttpClient;
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, VideoStream};
-use crate::provider::{AnimeProvider, BoxFuture};
+use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 const BASE_URL: &str = "https://onepace.net/api";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 #[derive(Deserialize)]
 struct ArcItem {
@@ -31,7 +31,7 @@ struct DownloadItem {
 }
 
 pub struct OnePaceProvider {
-    client: reqwest::Client,
+    client: ScraperHttpClient,
 }
 
 impl Default for OnePaceProvider {
@@ -42,17 +42,25 @@ impl Default for OnePaceProvider {
 
 impl OnePaceProvider {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self {
+            client: ScraperHttpClient::new(),
+        }
     }
 }
 
 impl AnimeProvider for OnePaceProvider {
-    fn name(&self) -> &'static str {
-        "onepace"
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            id: "onepace",
+            name: "onepace",
+            display_name: "One Pace",
+            description: "Manga-accurate, filler-free One Piece episodes with dual audio",
+            supported_audio: vec![AudioType::Sub, AudioType::Dub],
+            priority: ProviderPriority::High,
+            is_official: false,
+            primary_domain: "onepace.net",
+            mirror_domains: vec!["onepace.net"],
+        }
     }
 
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<AnimeSearchResult>>> {
@@ -62,16 +70,9 @@ impl AnimeProvider for OnePaceProvider {
                 return Ok(Vec::new());
             }
 
-            let url = format!("{BASE_URL}/arcs");
-            let arcs: Vec<ArcItem> = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let urls = vec![format!("{BASE_URL}/arcs")];
+            let (_eff, arcs): (String, Vec<ArcItem>) =
+                self.client.get_json_with_mirrors(&urls, Some("https://onepace.net/")).await?;
 
             Ok(arcs
                 .into_iter()
@@ -87,16 +88,9 @@ impl AnimeProvider for OnePaceProvider {
 
     fn episodes<'a>(&'a self, anime_id: &'a str) -> BoxFuture<'a, Result<Vec<Episode>>> {
         Box::pin(async move {
-            let url = format!("{BASE_URL}/arcs");
-            let arcs: Vec<ArcItem> = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let urls = vec![format!("{BASE_URL}/arcs")];
+            let (_eff, arcs): (String, Vec<ArcItem>) =
+                self.client.get_json_with_mirrors(&urls, Some("https://onepace.net/")).await?;
 
             let target_arc = arcs
                 .into_iter()
@@ -118,16 +112,9 @@ impl AnimeProvider for OnePaceProvider {
 
     fn stream<'a>(&'a self, episode_id: &'a str, audio: AudioType) -> BoxFuture<'a, Result<StreamSource>> {
         Box::pin(async move {
-            let url = format!("{BASE_URL}/arcs");
-            let arcs: Vec<ArcItem> = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let urls = vec![format!("{BASE_URL}/arcs")];
+            let (_eff, arcs): (String, Vec<ArcItem>) =
+                self.client.get_json_with_mirrors(&urls, Some("https://onepace.net/")).await?;
 
             for a in arcs {
                 for ep in a.episodes {

@@ -16,13 +16,14 @@ use gpui_kit::*;
 use silvani_meta::image_cache::ImageCacheManager;
 use silvani_meta::models::{AnimeItem, DashboardData};
 use silvani_meta::AnimeMetadataClient;
-use silvani_player::{MediaPlayer, MpvPlayer, PlayerEvent};
+use silvani_player::{MediaPlayer, MpvController, MpvPlayer, PlaybackStatus, PlayerEvent};
 use silvani_scraper::models::{AudioType, Episode};
 use silvani_scraper::{AnimeStreamService, ScraperEngine};
 
 use crate::components::category_tabs::AnimeCategory;
 use crate::components::stream_settings_bar::SelectedAudio;
 use crate::components::theme_picker::{ThemePickerDelegate, ThemePickerState};
+use crate::components::VideoPlayerControls;
 use crate::history::{HistoryItem, WatchHistoryManager};
 use crate::settings::AppSettings;
 use crate::views::browse::BrowseView;
@@ -32,6 +33,13 @@ use crate::views::settings_view::SettingsView;
 use gpui_kit::component::list::{List, ListEvent, ListState};
 
 gpui_kit::actions!(silvani, [ToggleThemePicker, ReloadApp]);
+
+#[derive(Clone)]
+pub struct ActivePlaybackState {
+    pub title: String,
+    pub controller: Option<MpvController>,
+    pub status: PlaybackStatus,
+}
 
 #[derive(Clone)]
 pub enum CurrentPage {
@@ -63,6 +71,7 @@ pub struct SearchView {
     current_items: Vec<AnimeItem>,
     current_category: AnimeCategory,
     current_page: CurrentPage,
+    active_playback: Option<ActivePlaybackState>,
     is_loading: bool,
     theme_picker: Option<ThemePickerState>,
     focus_handle: FocusHandle,
@@ -130,6 +139,7 @@ impl SearchView {
             current_items: Vec::new(),
             current_category: AnimeCategory::Trending,
             current_page: CurrentPage::Browse,
+            active_playback: None,
             is_loading: true,
             theme_picker: None,
             focus_handle,
@@ -637,29 +647,61 @@ impl SearchView {
 
         window.push_notification(format!("Opening {} - Episode {:.0}", title, ep_number), cx);
 
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PlayerEvent>();
+
+        let ep_title = format!("{} - Episode {:.0}", title, ep_number);
+        let title_c = ep_title.clone();
+        let aid_c = anime_id.clone();
+        let cov_c = cover.clone();
+        let hist_c = history.clone();
+
         cx.spawn_in(window, async move |this, cx| {
-            let title_c = title.clone();
-            let aid_c = anime_id.clone();
-            let cov_c = cover.clone();
-            let hist_c = history.clone();
+            while let Some(event) = rx.recv().await {
+                this.update_in(cx, |this, _window, cx| {
+                    match &event {
+                        PlayerEvent::Started(controller) => {
+                            this.active_playback = Some(ActivePlaybackState {
+                                title: title_c.clone(),
+                                controller: Some(controller.clone()),
+                                status: PlaybackStatus::default(),
+                            });
+                            cx.notify();
+                        }
+                        PlayerEvent::StatusUpdate(status) => {
+                            if let Some(ref mut playback) = this.active_playback {
+                                playback.status = status.clone();
+                                cx.notify();
+                            }
+                        }
+                        PlayerEvent::Finished | PlayerEvent::Error(_) => {
+                            this.active_playback = None;
+                            cx.notify();
+                        }
+                        PlayerEvent::Progress(pct) => {
+                            let _ = hist_c.record_watched(
+                                &aid_c,
+                                ep_number,
+                                &title_c,
+                                None,
+                                cov_c.as_deref(),
+                                *pct,
+                            );
+                        }
+                        _ => {}
+                    }
+                }).ok();
+            }
+        }).detach();
 
-            let on_event = Arc::new(move |event: PlayerEvent| {
-                if let PlayerEvent::Progress(pct) = event {
-                    let _ = hist_c.record_watched(
-                        &aid_c,
-                        ep_number,
-                        &title_c,
-                        None,
-                        cov_c.as_deref(),
-                        pct,
-                    );
-                }
-            });
+        let on_event = Arc::new(move |event: PlayerEvent| {
+            let _ = tx.send(event);
+        });
 
+        cx.spawn_in(window, async move |this, cx| {
             let play_res = if prov == "muse_india" || prov == "ani_one_asia" {
                 if let Some(eid) = ep_id {
                     player.play_youtube(
-                        &format!("{} - Episode {}", title, ep_number),
+                        &format!("{} - Episode {:.0}", title, ep_number),
                         &eid,
                         Some(&res),
                         on_event,
@@ -669,7 +711,7 @@ impl SearchView {
                     let target_ep = eps.iter().find(|e| (e.number - ep_number).abs() < 0.1).or_else(|| eps.first());
                     if let Some(ep) = target_ep {
                         player.play_youtube(
-                            &format!("{} - Episode {}", title, ep.number),
+                            &format!("{} - Episode {:.0}", title, ep.number),
                             &ep.id,
                             Some(&res),
                             on_event,
@@ -681,7 +723,7 @@ impl SearchView {
             } else {
                 match service.resolve_stream(&title, &prov, ep_id.as_deref(), ep_number, audio_type).await {
                     Ok(source) => player.play_stream(
-                        &format!("{} - Episode {}", title, ep_number),
+                        &format!("{} - Episode {:.0}", title, ep_number),
                         &source,
                         Some(&res),
                         on_event,
@@ -760,7 +802,13 @@ impl Render for SearchView {
                     self.watch_history.clone(),
                     Arc::clone(&self.image_cache),
                 )
-                .available_providers(self.app_settings.enabled_providers())
+                .available_providers({
+                    let filtered = self.stream_service.engine().filter_providers_by_audio(selected_audio.to_audio_type());
+                    let enabled_list = self.app_settings.enabled_providers();
+                    enabled_list.into_iter().filter(|(id, _)| {
+                        filtered.iter().any(|p| p.name() == id || p.id() == id)
+                    }).collect()
+                })
                 .on_back(cx.listener(|this, _, _window, cx| {
                     this.current_page = CurrentPage::Browse;
                     cx.notify();
@@ -927,6 +975,34 @@ impl Render for SearchView {
                                     .search_placeholder("search")
                             )
                             .focus_trap("theme-picker-trap", &picker.trap_handle),
+                    ),
+            );
+        }
+
+        if let Some(ref playback) = self.active_playback {
+            let title = playback.title.clone();
+            let status = playback.status.clone();
+            let controller = playback.controller.clone();
+
+            shell = shell.child(
+                div()
+                    .absolute()
+                    .bottom_4()
+                    .left_4()
+                    .right_4()
+                    .occlude()
+                    .child(
+                        VideoPlayerControls::new("active-video-player-controls", title, status)
+                            .controller(controller)
+                            .on_close(cx.listener(|this, _, _window, cx| {
+                                if let Some(ref playback) = this.active_playback {
+                                    if let Some(ref ctrl) = playback.controller {
+                                        let _ = ctrl.send_command(serde_json::json!(["quit"]));
+                                    }
+                                }
+                                this.active_playback = None;
+                                cx.notify();
+                            })),
                     ),
             );
         }

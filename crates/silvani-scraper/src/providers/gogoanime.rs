@@ -2,8 +2,9 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use crate::error::{Result, ScraperError};
+use crate::http::ScraperHttpClient;
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, VideoStream};
-use crate::provider::{AnimeProvider, BoxFuture};
+use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 static SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<a\s+href="[^"]*/category/([^"]*)"\s+title="([^"]*)""#).unwrap()
@@ -17,11 +18,13 @@ static IFRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<iframe\s+src="([^"]+)""#).unwrap()
 });
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const BASE_URL: &str = "https://anitaku.pe";
+const MIRRORS: &[&str] = &[
+    "https://anitaku.pe",
+    "https://anitaku.so",
+];
 
 pub struct GogoAnimeProvider {
-    client: reqwest::Client,
+    client: ScraperHttpClient,
 }
 
 impl Default for GogoAnimeProvider {
@@ -32,31 +35,36 @@ impl Default for GogoAnimeProvider {
 
 impl GogoAnimeProvider {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self {
+            client: ScraperHttpClient::new(),
+        }
     }
 }
 
 impl AnimeProvider for GogoAnimeProvider {
-    fn name(&self) -> &'static str {
-        "gogoanime"
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            id: "gogoanime",
+            name: "gogoanime",
+            display_name: "GogoAnime (AniTaku)",
+            description: "Massive classic & modern anime catalog (Sub & Dub)",
+            supported_audio: vec![AudioType::Sub, AudioType::Dub],
+            priority: ProviderPriority::High,
+            is_official: false,
+            primary_domain: "anitaku.pe",
+            mirror_domains: MIRRORS.to_vec(),
+        }
     }
 
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<AnimeSearchResult>>> {
         Box::pin(async move {
-            let url = format!("{BASE_URL}/search.html?keyword={}", query.replace(' ', "+"));
-            let html = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let query_param = query.replace(' ', "+");
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/search.html?keyword={query_param}"))
+                .collect();
+
+            let (_effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let mut results = Vec::new();
             for cap in SEARCH_RE.captures_iter(&html) {
@@ -73,16 +81,12 @@ impl AnimeProvider for GogoAnimeProvider {
 
     fn episodes<'a>(&'a self, anime_id: &'a str) -> BoxFuture<'a, Result<Vec<Episode>>> {
         Box::pin(async move {
-            let page_url = format!("{BASE_URL}/category/{anime_id}");
-            let html = self
-                .client
-                .get(&page_url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/category/{anime_id}"))
+                .collect();
+
+            let (_effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let mut episodes = Vec::new();
             for cap in EPISODE_RE.captures_iter(&html) {
@@ -100,16 +104,12 @@ impl AnimeProvider for GogoAnimeProvider {
 
     fn stream<'a>(&'a self, episode_id: &'a str, audio: AudioType) -> BoxFuture<'a, Result<StreamSource>> {
         Box::pin(async move {
-            let ep_url = format!("{BASE_URL}/{episode_id}");
-            let html = self
-                .client
-                .get(&ep_url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/{episode_id}"))
+                .collect();
+
+            let (effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let iframe_cap = IFRAME_RE
                 .captures(&html)
@@ -121,16 +121,25 @@ impl AnimeProvider for GogoAnimeProvider {
                 iframe_cap[1].to_string()
             };
 
+            let domain = effective_url
+                .split('/')
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("/");
+
             Ok(StreamSource {
                 provider: self.name().to_string(),
                 audio_type: audio,
-                language: "Japanese".to_string(),
+                language: match audio {
+                    AudioType::Dub => "English".to_string(),
+                    _ => "Japanese".to_string(),
+                },
                 streams: vec![VideoStream {
                     quality: "auto".to_string(),
                     url: stream_url,
                 }],
                 subtitles: Vec::new(),
-                referer: BASE_URL.to_string(),
+                referer: domain,
             })
         })
     }

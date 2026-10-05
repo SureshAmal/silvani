@@ -2,12 +2,14 @@ use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
 use crate::error::{Result, ScraperError};
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, VideoStream};
-use crate::provider::{AnimeProvider, BoxFuture};
+use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 pub struct YouTubeAnimeProvider {
     channel_name: &'static str,
     channel_query: &'static str,
+    display_title: &'static str,
     default_language: &'static str,
+    supported_audio: Vec<AudioType>,
 }
 
 impl YouTubeAnimeProvider {
@@ -15,7 +17,9 @@ impl YouTubeAnimeProvider {
         Self {
             channel_name: "muse_india",
             channel_query: "Muse India",
+            display_title: "Muse India (YouTube Official)",
             default_language: "Hindi",
+            supported_audio: vec![AudioType::Hindi, AudioType::Sub],
         }
     }
 
@@ -23,14 +27,26 @@ impl YouTubeAnimeProvider {
         Self {
             channel_name: "ani_one_asia",
             channel_query: "Ani-One Asia",
+            display_title: "Ani-One Asia (YouTube Official)",
             default_language: "English",
+            supported_audio: vec![AudioType::Sub],
         }
     }
 }
 
 impl AnimeProvider for YouTubeAnimeProvider {
-    fn name(&self) -> &'static str {
-        self.channel_name
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            id: self.channel_name,
+            name: self.channel_name,
+            display_name: self.display_title,
+            description: "Official, legal YouTube anime broadcasts with high reliability",
+            supported_audio: self.supported_audio.clone(),
+            priority: ProviderPriority::High,
+            is_official: true,
+            primary_domain: "youtube.com",
+            mirror_domains: vec!["youtube.com", "youtu.be"],
+        }
     }
 
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<AnimeSearchResult>>> {

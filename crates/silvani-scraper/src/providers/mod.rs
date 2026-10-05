@@ -1,3 +1,4 @@
+pub mod allanime;
 pub mod animeonsen;
 pub mod animeworld;
 pub mod desidub;
@@ -6,6 +7,7 @@ pub mod hianime;
 pub mod onepace;
 pub mod youtube;
 
+pub use allanime::AllAnimeProvider;
 pub use animeonsen::AnimeOnsenProvider;
 pub use animeworld::AnimeWorldIndiaProvider;
 pub use desidub::DesiDubAnimeProvider;

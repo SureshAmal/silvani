@@ -4,8 +4,9 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 
 use crate::error::{Result, ScraperError};
+use crate::http::ScraperHttpClient;
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, SubtitleTrack, VideoStream};
-use crate::provider::{AnimeProvider, BoxFuture};
+use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 static SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"class="film-name">\s*<a href="[^"]*/([^"/]*)"\s*title="([^"]*)""#).unwrap()
@@ -19,8 +20,13 @@ static BLOB_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"window\.__P="([^"]*)""#).unwrap()
 });
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const XOR_KEY: &[u8] = b"otaku-embed-v1";
+const MIRRORS: &[&str] = &[
+    "https://hianime.at",
+    "https://hianime.nz",
+    "https://aniwatchtv.to",
+    "https://hianime.to",
+];
 
 #[derive(Deserialize)]
 struct EpisodeListResponse {
@@ -44,7 +50,7 @@ struct RawSubtitle {
 }
 
 pub struct HiAnimeProvider {
-    client: reqwest::Client,
+    client: ScraperHttpClient,
 }
 
 impl Default for HiAnimeProvider {
@@ -55,11 +61,9 @@ impl Default for HiAnimeProvider {
 
 impl HiAnimeProvider {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self {
+            client: ScraperHttpClient::new(),
+        }
     }
 
     fn deobfuscate(blob: &str) -> Result<DecryptedPayload> {
@@ -78,24 +82,29 @@ impl HiAnimeProvider {
 }
 
 impl AnimeProvider for HiAnimeProvider {
-    fn name(&self) -> &'static str {
-        "hianime"
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            id: "hianime",
+            name: "hianime",
+            display_name: "HiAnime",
+            description: "High quality 1080p HLS streaming with soft subtitles (Sub & Dub)",
+            supported_audio: vec![AudioType::Sub, AudioType::Dub],
+            priority: ProviderPriority::High,
+            is_official: false,
+            primary_domain: "hianime.to",
+            mirror_domains: MIRRORS.to_vec(),
+        }
     }
 
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<AnimeSearchResult>>> {
         Box::pin(async move {
             let query_param = query.replace(' ', "+");
-            let url = format!("https://hianime.at/search?keyword={query_param}");
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/search?keyword={query_param}"))
+                .collect();
 
-            let html = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let (_effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let mut results = Vec::new();
             for cap in SEARCH_RE.captures_iter(&html) {
@@ -117,16 +126,13 @@ impl AnimeProvider for HiAnimeProvider {
                 .next_back()
                 .ok_or_else(|| ScraperError::Parse("Invalid anime slug".into()))?;
 
-            let url = format!("https://hianime.at/api/theme/episode/list/{numeric_id}");
-            let res: EpisodeListResponse = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/api/theme/episode/list/{numeric_id}"))
+                .collect();
+
+            let (_effective_url, res): (String, EpisodeListResponse) =
+                self.client.get_json_with_mirrors(&urls, None).await?;
 
             let mut episodes = Vec::new();
             for cap in EP_ITEM_RE.captures_iter(&res.html) {
@@ -144,20 +150,17 @@ impl AnimeProvider for HiAnimeProvider {
     fn stream<'a>(&'a self, episode_id: &'a str, audio: AudioType) -> BoxFuture<'a, Result<StreamSource>> {
         Box::pin(async move {
             let mode_str = match audio {
-                AudioType::Sub => "sub",
                 AudioType::Dub => "dub",
+                _ => "sub",
             };
 
-            let servers_url = format!("https://hianime.at/api/theme/episode/servers?episodeId={episode_id}");
-            let resp: serde_json::Value = self
-                .client
-                .get(&servers_url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| ScraperError::Parse(e.to_string()))?;
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/api/theme/episode/servers?episodeId={episode_id}"))
+                .collect();
+
+            let (server_base_url, resp): (String, serde_json::Value) =
+                self.client.get_json_with_mirrors(&urls, None).await?;
 
             let html = resp["html"]
                 .as_str()
@@ -203,16 +206,11 @@ impl AnimeProvider for HiAnimeProvider {
             let embed_url = String::from_utf8(embed_url_bytes)
                 .map_err(|e| ScraperError::Crypto(e.to_string()))?;
 
-            let embed_html = self
+            let embed_urls = vec![embed_url.clone()];
+            let (_eff, embed_html) = self
                 .client
-                .get(&embed_url)
-                .header("Referer", "https://zokoanime.video/")
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+                .get_html_with_mirrors(&embed_urls, Some("https://zokoanime.video/"))
+                .await?;
 
             let blob_cap = BLOB_RE
                 .captures(&embed_html)
@@ -244,7 +242,11 @@ impl AnimeProvider for HiAnimeProvider {
                     url: payload.src,
                 }],
                 subtitles,
-                referer: "https://zokoanime.video/".to_string(),
+                referer: if server_base_url.contains("zokoanime") {
+                    "https://zokoanime.video/".to_string()
+                } else {
+                    "https://megacloud.tv/".to_string()
+                },
             })
         })
     }

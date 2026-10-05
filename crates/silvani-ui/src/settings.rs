@@ -21,7 +21,10 @@ fn default_true() -> bool {
 fn default_providers() -> Vec<ProviderSetting> {
     vec![
         ProviderSetting { id: "hianime".to_string(), name: "HiAnime".to_string(), enabled: true },
+        ProviderSetting { id: "allanime".to_string(), name: "AllAnime".to_string(), enabled: true },
         ProviderSetting { id: "gogoanime".to_string(), name: "GogoAnime".to_string(), enabled: true },
+        ProviderSetting { id: "animeonsen".to_string(), name: "AnimeOnsen".to_string(), enabled: true },
+        ProviderSetting { id: "onepace".to_string(), name: "One Pace".to_string(), enabled: true },
         ProviderSetting { id: "muse_india".to_string(), name: "Muse India (YT)".to_string(), enabled: true },
         ProviderSetting { id: "ani_one_asia".to_string(), name: "Ani-One Asia (YT)".to_string(), enabled: true },
         ProviderSetting { id: "animeworldindia".to_string(), name: "AnimeWorld India (HI)".to_string(), enabled: true },

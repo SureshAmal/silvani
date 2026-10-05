@@ -1,9 +1,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::error::{Result, ScraperError};
+use crate::error::Result;
+use crate::http::ScraperHttpClient;
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, VideoStream};
-use crate::provider::{AnimeProvider, BoxFuture};
+use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 static POST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<h2\s+class="entry-title"><a\s+href="([^"]*)"[^>]*>([^<]*)</a>"#).unwrap()
@@ -17,11 +18,13 @@ static IFRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<iframe[^>]+src="([^"]+)""#).unwrap()
 });
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const BASE_URL: &str = "https://animeworldindia.net";
+const MIRRORS: &[&str] = &[
+    "https://animeworldindia.net",
+    "https://animeworld.ac",
+];
 
 pub struct AnimeWorldIndiaProvider {
-    client: reqwest::Client,
+    client: ScraperHttpClient,
 }
 
 impl Default for AnimeWorldIndiaProvider {
@@ -32,31 +35,36 @@ impl Default for AnimeWorldIndiaProvider {
 
 impl AnimeWorldIndiaProvider {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self {
+            client: ScraperHttpClient::new(),
+        }
     }
 }
 
 impl AnimeProvider for AnimeWorldIndiaProvider {
-    fn name(&self) -> &'static str {
-        "animeworldindia"
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            id: "animeworldindia",
+            name: "animeworldindia",
+            display_name: "AnimeWorld India",
+            description: "Direct Hindi dubbed anime and movies with multi-audio",
+            supported_audio: vec![AudioType::Hindi, AudioType::Sub],
+            priority: ProviderPriority::High,
+            is_official: false,
+            primary_domain: "animeworldindia.net",
+            mirror_domains: MIRRORS.to_vec(),
+        }
     }
 
     fn search<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<Vec<AnimeSearchResult>>> {
         Box::pin(async move {
-            let url = format!("{BASE_URL}/?s={}", query.replace(' ', "+"));
-            let html = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let query_param = query.replace(' ', "+");
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/?s={query_param}"))
+                .collect();
+
+            let (_effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let mut results = Vec::new();
             for cap in POST_RE.captures_iter(&html) {
@@ -81,16 +89,12 @@ impl AnimeProvider for AnimeWorldIndiaProvider {
 
     fn episodes<'a>(&'a self, anime_id: &'a str) -> BoxFuture<'a, Result<Vec<Episode>>> {
         Box::pin(async move {
-            let url = format!("{BASE_URL}/{anime_id}/");
-            let html = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let urls: Vec<String> = MIRRORS
+                .iter()
+                .map(|m| format!("{m}/{anime_id}/"))
+                .collect();
+
+            let (effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let mut episodes = Vec::new();
             for cap in EPISODE_LINK_RE.captures_iter(&html) {
@@ -104,7 +108,7 @@ impl AnimeProvider for AnimeWorldIndiaProvider {
 
             if episodes.is_empty() {
                 episodes.push(Episode {
-                    id: format!("{BASE_URL}/{anime_id}/"),
+                    id: effective_url,
                     number: 1.0,
                     title: Some("Full Release".into()),
                 });
@@ -116,21 +120,20 @@ impl AnimeProvider for AnimeWorldIndiaProvider {
 
     fn stream<'a>(&'a self, episode_id: &'a str, audio: AudioType) -> BoxFuture<'a, Result<StreamSource>> {
         Box::pin(async move {
-            let html = self
-                .client
-                .get(episode_id)
-                .send()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?
-                .text()
-                .await
-                .map_err(|e| ScraperError::Network(e.to_string()))?;
+            let urls = vec![episode_id.to_string()];
+            let (effective_url, html) = self.client.get_html_with_mirrors(&urls, None).await?;
 
             let stream_url = if let Some(cap) = IFRAME_RE.captures(&html) {
                 cap[1].to_string()
             } else {
-                episode_id.to_string()
+                effective_url.clone()
             };
+
+            let domain = effective_url
+                .split('/')
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("/");
 
             Ok(StreamSource {
                 provider: self.name().to_string(),
@@ -141,7 +144,7 @@ impl AnimeProvider for AnimeWorldIndiaProvider {
                     url: stream_url,
                 }],
                 subtitles: Vec::new(),
-                referer: BASE_URL.to_string(),
+                referer: domain,
             })
         })
     }

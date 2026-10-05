@@ -20,7 +20,8 @@ impl SelectedAudio {
     pub fn to_audio_type(&self) -> AudioType {
         match self {
             Self::Sub => AudioType::Sub,
-            Self::Dub | Self::Hindi => AudioType::Dub,
+            Self::Dub => AudioType::Dub,
+            Self::Hindi => AudioType::Hindi,
         }
     }
 }

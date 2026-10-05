@@ -91,10 +91,7 @@ impl CacheStore {
 
     pub fn get_stream(&self, provider: &str, episode_id: &str, audio: &AudioType, ttl_secs: u64) -> Option<StreamSource> {
         let conn = self.conn.lock().unwrap();
-        let audio_str = match audio {
-            AudioType::Sub => "sub",
-            AudioType::Dub => "dub",
-        };
+        let audio_str = audio.as_str();
         let mut stmt = conn
             .prepare("SELECT stream_json, created_at FROM stream_cache WHERE provider = ?1 AND episode_id = ?2 AND audio_type = ?3")
             .ok()?;
@@ -114,10 +111,7 @@ impl CacheStore {
 
     pub fn set_stream(&self, provider: &str, episode_id: &str, audio: &AudioType, stream: &StreamSource) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let audio_str = match audio {
-            AudioType::Sub => "sub",
-            AudioType::Dub => "dub",
-        };
+        let audio_str = audio.as_str();
         let json = serde_json::to_string(stream).map_err(|e| ScraperError::Parse(e.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO stream_cache (provider, episode_id, audio_type, stream_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",

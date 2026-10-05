@@ -1,59 +1,51 @@
 use std::sync::{Arc, OnceLock};
-use tokio::runtime::{Handle, Runtime};
+use std::time::Duration;
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::cache::CacheStore;
 use crate::error::Result;
 use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource};
-use crate::provider::AnimeProvider;
-use crate::providers::{
-    AnimeOnsenProvider, AnimeWorldIndiaProvider, DesiDubAnimeProvider, GogoAnimeProvider,
-    HiAnimeProvider, OnePaceProvider, YouTubeAnimeProvider,
-};
+use crate::provider::{AnimeProvider, ProviderMetadata};
+use crate::providers::*;
 
-static GLOBAL_TOKIO_RT: OnceLock<Runtime> = OnceLock::new();
+static TOKIO_RT: OnceLock<Runtime> = OnceLock::new();
 
-pub fn get_tokio_handle() -> Handle {
+fn get_tokio_handle() -> Handle {
     if let Ok(handle) = Handle::try_current() {
-        handle
-    } else {
-        GLOBAL_TOKIO_RT
-            .get_or_init(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to initialize background Tokio runtime for scrapers")
-            })
-            .handle()
-            .clone()
+        return handle;
     }
+
+    TOKIO_RT
+        .get_or_init(|| {
+            Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .expect("Failed to initialize background Scraper Tokio runtime")
+        })
+        .handle()
+        .clone()
 }
 
+pub fn provider_matches(registered_name: &str, requested_name: &str) -> bool {
+    let r = registered_name.to_lowercase().replace(['_', '-'], "");
+    let q = requested_name.to_lowercase().replace(['_', '-'], "");
+    r == q || r.contains(&q) || q.contains(&r)
+}
+
+#[derive(Clone)]
 pub struct ScraperEngine {
     providers: Vec<Arc<dyn AnimeProvider>>,
     cache: CacheStore,
 }
 
-impl Default for ScraperEngine {
-    fn default() -> Self {
-        Self::new().unwrap()
-    }
-}
-
-fn provider_matches(p_name: &str, target: &str) -> bool {
-    let p_clean = p_name.replace(['_', '-'], "").to_lowercase();
-    let t_clean = target.replace(['_', '-'], "").to_lowercase();
-    p_clean == t_clean
-        || (p_clean == "animeworldindia" && (t_clean == "animeworld" || t_clean == "animeworldindia"))
-        || (p_clean == "desidubanime" && (t_clean == "desidub" || t_clean == "desidubanime"))
-}
-
 impl ScraperEngine {
-    pub fn new() -> Result<Self> {
-        let cache = CacheStore::in_memory()?;
-        let providers: Vec<Arc<dyn AnimeProvider>> = vec![
+    fn default_providers() -> Vec<Arc<dyn AnimeProvider>> {
+        vec![
             Arc::new(HiAnimeProvider::new()),
+            Arc::new(AllAnimeProvider::new()),
             Arc::new(GogoAnimeProvider::new()),
             Arc::new(AnimeOnsenProvider::new()),
             Arc::new(OnePaceProvider::new()),
@@ -61,41 +53,86 @@ impl ScraperEngine {
             Arc::new(DesiDubAnimeProvider::new()),
             Arc::new(YouTubeAnimeProvider::muse_india()),
             Arc::new(YouTubeAnimeProvider::ani_one_asia()),
-        ];
-        Ok(Self { providers, cache })
+        ]
+    }
+
+    pub fn new() -> Result<Self> {
+        let cache = CacheStore::in_memory()?;
+        Ok(Self {
+            providers: Self::default_providers(),
+            cache,
+        })
     }
 
     pub fn with_cache_file(db_path: &str) -> Result<Self> {
         let cache = CacheStore::open(db_path)?;
-        let providers: Vec<Arc<dyn AnimeProvider>> = vec![
-            Arc::new(HiAnimeProvider::new()),
-            Arc::new(GogoAnimeProvider::new()),
-            Arc::new(AnimeOnsenProvider::new()),
-            Arc::new(OnePaceProvider::new()),
-            Arc::new(AnimeWorldIndiaProvider::new()),
-            Arc::new(DesiDubAnimeProvider::new()),
-            Arc::new(YouTubeAnimeProvider::muse_india()),
-            Arc::new(YouTubeAnimeProvider::ani_one_asia()),
-        ];
-        Ok(Self { providers, cache })
+        Ok(Self {
+            providers: Self::default_providers(),
+            cache,
+        })
     }
 
     pub fn register_provider(&mut self, provider: Arc<dyn AnimeProvider>) {
         self.providers.push(provider);
     }
 
+    pub fn providers(&self) -> &[Arc<dyn AnimeProvider>] {
+        &self.providers
+    }
+
+    pub fn provider_metadatas(&self) -> Vec<ProviderMetadata> {
+        self.providers.iter().map(|p| p.metadata()).collect()
+    }
+
+    pub fn filter_providers_by_audio(&self, audio: AudioType) -> Vec<Arc<dyn AnimeProvider>> {
+        self.providers
+            .iter()
+            .filter(|p| p.supported_audio().contains(&audio))
+            .cloned()
+            .collect()
+    }
+
     pub fn clear_cache(&self) {
         let _ = self.cache.clear();
     }
 
-    /// Reactive Streaming API: Pushes results immediately as each provider finishes.
-    /// UI pulls from Receiver in real-time without waiting for other providers.
+    /// Reactive Streaming API with fast-first racing: Pushes results immediately as each provider finishes.
     pub fn search_stream(&self, query: &str) -> mpsc::Receiver<Vec<AnimeSearchResult>> {
-        let (tx, rx) = mpsc::channel(self.providers.len().max(1));
+        self.search_stream_filtered(query, None, None)
+    }
+
+    /// Filtered Streaming Search: Allows filtering by language (AudioType) and/or specific enabled provider IDs.
+    /// Emits results instantly as individual providers respond (fast-first racing).
+    pub fn search_stream_filtered(
+        &self,
+        query: &str,
+        audio_filter: Option<AudioType>,
+        provider_ids: Option<Vec<String>>,
+    ) -> mpsc::Receiver<Vec<AnimeSearchResult>> {
+        let matched_providers: Vec<Arc<dyn AnimeProvider>> = self
+            .providers
+            .iter()
+            .filter(|p| {
+                if let Some(audio) = audio_filter {
+                    if !p.supported_audio().contains(&audio) {
+                        return false;
+                    }
+                }
+                if let Some(ref ids) = provider_ids {
+                    if !ids.iter().any(|id| provider_matches(p.name(), id) || provider_matches(p.id(), id)) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        let (tx, rx) = mpsc::channel(matched_providers.len().max(1));
         let handle = get_tokio_handle();
 
-        for provider in &self.providers {
-            let p = Arc::clone(provider);
+        for provider in matched_providers {
+            let p = Arc::clone(&provider);
             let q = query.to_string();
             let cache = self.cache.clone();
             let sender = tx.clone();
@@ -108,18 +145,23 @@ impl ScraperEngine {
                     return;
                 }
 
-                if let Ok(results) = p.search(&q).await
-                    && !results.is_empty() {
+                // Race provider search with a 7-second timeout to prevent blocked providers from lingering
+                let search_fut = p.search(&q);
+                let timeout_fut = tokio::time::timeout(Duration::from_secs(15), search_fut);
+
+                if let Ok(Ok(results)) = timeout_fut.await {
+                    if !results.is_empty() {
                         let _ = cache.set_search(&q, p.name(), &results);
                         let _ = sender.send(results).await;
                     }
+                }
             });
         }
 
         rx
     }
 
-    /// Batch Search API: Waits for all providers to complete and aggregates results.
+    /// Batch Search API: Waits for providers and aggregates ranked results.
     pub async fn search(&self, query: &str) -> Vec<AnimeSearchResult> {
         let handle = get_tokio_handle();
         let providers = self.providers.clone();
@@ -139,7 +181,9 @@ impl ScraperEngine {
                         if let Some(cached) = cache.get_search(&q, p.name(), 3600) {
                             return cached;
                         }
-                        if let Ok(results) = p.search(&q).await {
+
+                        let search_fut = p.search(&q);
+                        if let Ok(Ok(results)) = tokio::time::timeout(Duration::from_secs(15), search_fut).await {
                             let _ = cache.set_search(&q, p.name(), &results);
                             results
                         } else {
@@ -236,7 +280,7 @@ impl ScraperEngine {
             return Ok(cached);
         }
 
-        let source = provider.stream(episode_id, audio.clone()).await?;
+        let source = provider.stream(episode_id, audio).await?;
         let _ = self.cache.set_stream(prov_key, episode_id, &audio, &source);
         Ok(source)
     }
@@ -250,7 +294,18 @@ mod tests {
     fn test_search_stream_without_ambient_runtime() {
         let engine = ScraperEngine::new().unwrap();
         let mut rx = engine.search_stream("Naruto");
-        // Verify receiver is active and no panic occurs
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_provider_filtering() {
+        let engine = ScraperEngine::new().unwrap();
+        let hindi_providers = engine.filter_providers_by_audio(AudioType::Hindi);
+        assert!(!hindi_providers.is_empty());
+        assert!(hindi_providers.iter().any(|p| p.name() == "animeworldindia"));
+
+        let sub_providers = engine.filter_providers_by_audio(AudioType::Sub);
+        assert!(sub_providers.iter().any(|p| p.name() == "hianime"));
+        assert!(sub_providers.iter().any(|p| p.name() == "allanime"));
     }
 }
