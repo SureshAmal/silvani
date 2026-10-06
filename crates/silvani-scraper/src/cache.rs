@@ -13,6 +13,8 @@ pub struct CacheStore {
 impl CacheStore {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path).map_err(|e| ScraperError::Network(e.to_string()))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };

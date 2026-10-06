@@ -39,6 +39,8 @@ impl WatchHistoryManager {
         let db_path = db_dir.join("history.db");
 
         let conn = Connection::open(&db_path)?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         conn.execute(
             "CREATE TABLE IF NOT EXISTS watch_history (
                 anime_id TEXT NOT NULL,
