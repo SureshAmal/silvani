@@ -145,7 +145,7 @@ impl RenderOnce for StreamSettingsBar {
                                 let is_active = self.selected_audio == SelectedAudio::Sub;
                                 Button::new("audio-sub")
                                     .small()
-                                    .label("Sub (JP)")
+                                    .label(if is_active { "✓ Sub (JP)" } else { "Sub (JP)" })
                                     .when(is_active, |b| b.primary())
                                     .when(!is_active, |b| b.outline())
                                     .when_some(cb, |b, h| {
@@ -157,7 +157,7 @@ impl RenderOnce for StreamSettingsBar {
                                 let is_active = self.selected_audio == SelectedAudio::Dub;
                                 Button::new("audio-dub")
                                     .small()
-                                    .label("Dub (EN)")
+                                    .label(if is_active { "✓ Dub (EN)" } else { "Dub (EN)" })
                                     .when(is_active, |b| b.primary())
                                     .when(!is_active, |b| b.outline())
                                     .when_some(cb, |b, h| {
@@ -169,7 +169,7 @@ impl RenderOnce for StreamSettingsBar {
                                 let is_active = self.selected_audio == SelectedAudio::Hindi;
                                 Button::new("audio-hi")
                                     .small()
-                                    .label("Dub (Hindi)")
+                                    .label(if is_active { "✓ Dub (Hindi)" } else { "Dub (Hindi)" })
                                     .when(is_active, |b| b.primary())
                                     .when(!is_active, |b| b.outline())
                                     .when_some(cb, |b, h| {
@@ -192,7 +192,7 @@ impl RenderOnce for StreamSettingsBar {
                                 let is_active = self.selected_resolution.eq_ignore_ascii_case(res);
                                 Button::new(format!("res-{}", res))
                                     .small()
-                                    .label(res)
+                                    .label(if is_active { format!("✓ {}", res) } else { res.to_string() })
                                     .when(is_active, |b| b.primary())
                                     .when(!is_active, |b| b.outline())
                                     .when_some(cb, move |b, h| {
@@ -221,7 +221,7 @@ impl RenderOnce for StreamSettingsBar {
                         let is_active = self.selected_provider.eq_ignore_ascii_case(prov_key);
                         Button::new(format!("prov-{}", prov_key))
                             .small()
-                            .label(prov_name.clone())
+                            .label(if is_active { format!("✓ {}", prov_name) } else { prov_name.clone() })
                             .when(is_active, |b| b.primary())
                             .when(!is_active, |b| b.outline())
                             .when_some(cb, move |b, h| {
