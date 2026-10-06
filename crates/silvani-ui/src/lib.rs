@@ -6,8 +6,9 @@ pub mod views;
 use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{
-    v_flex, ActiveTheme, FocusTrapElement, Theme, ThemeMode, ThemeRegistry, WindowExt,
+    v_flex, ActiveTheme, FocusTrapElement, Theme, ThemeMode, ThemeRegistry,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -16,7 +17,7 @@ use gpui_kit::*;
 use silvani_meta::image_cache::ImageCacheManager;
 use silvani_meta::models::{AnimeItem, DashboardData};
 use silvani_meta::AnimeMetadataClient;
-use silvani_player::{MediaPlayer, MpvController, MpvPlayer, PlaybackStatus, PlayerEvent};
+use silvani_player::{MediaPlayer, MpvPlayer, PlaybackStatus, PlayerController, PlayerEvent};
 use silvani_scraper::models::{AudioType, Episode};
 use silvani_scraper::{AnimeStreamService, ScraperEngine};
 
@@ -30,6 +31,7 @@ use crate::views::browse::BrowseView;
 use crate::views::details::{DetailsView, PlayEpisodeRequest};
 use crate::views::history_view::HistoryView;
 use crate::views::settings_view::SettingsView;
+use crate::views::player_view::EmbeddedPlayerView;
 use gpui_kit::component::list::{List, ListEvent, ListState};
 
 gpui_kit::actions!(silvani, [ToggleThemePicker, ReloadApp]);
@@ -37,8 +39,10 @@ gpui_kit::actions!(silvani, [ToggleThemePicker, ReloadApp]);
 #[derive(Clone)]
 pub struct ActivePlaybackState {
     pub title: String,
-    pub controller: Option<MpvController>,
+    pub controller: Option<PlayerController>,
     pub status: PlaybackStatus,
+    pub current_frame: Option<Arc<gpui::RenderImage>>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -52,6 +56,16 @@ pub enum CurrentPage {
         selected_audio: SelectedAudio,
         selected_resolution: String,
         is_loading_episodes: bool,
+    },
+    EmbeddedPlayer {
+        anime_item: Box<AnimeItem>,
+        episodes: Vec<Episode>,
+        ep_number: f32,
+        ep_title: String,
+        provider: String,
+        audio: String,
+        resolution: String,
+        is_loading: bool,
     },
     History,
     Settings,
@@ -73,6 +87,11 @@ pub struct SearchView {
     current_page: CurrentPage,
     active_playback: Option<ActivePlaybackState>,
     is_loading: bool,
+    is_player_fullscreen: bool,
+    last_mouse_activity: std::time::Instant,
+    seek_slider: Entity<SliderState>,
+    volume_slider: Entity<SliderState>,
+    is_seeking_drag: bool,
     theme_picker: Option<ThemePickerState>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -125,6 +144,58 @@ impl SearchView {
         let watch_history = WatchHistoryManager::new().expect("Failed to init watch history database");
         let app_settings = settings::load_settings();
 
+        let seek_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(100.0)
+                .step(0.1)
+                .default_value(0.0)
+        });
+
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(100.0)
+                .step(1.0)
+                .default_value(100.0)
+        });
+
+        let seek_sub = cx.subscribe_in(&seek_slider, window, |this, _, event: &SliderEvent, _window, cx| {
+            match event {
+                SliderEvent::Change(val) => {
+                    this.is_seeking_drag = true;
+                    let target_secs = val.start() as f64;
+                    if let Some(ref mut pb) = this.active_playback {
+                        pb.status.position_secs = target_secs;
+                    }
+                }
+                SliderEvent::Release(val) => {
+                    this.is_seeking_drag = false;
+                    let target_secs = val.start() as f64;
+                    if let Some(ref mut pb) = this.active_playback {
+                        pb.status.position_secs = target_secs;
+                        if let Some(ref ctrl) = pb.controller {
+                            let _ = ctrl.seek_absolute(target_secs);
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        });
+
+        let vol_sub = cx.subscribe_in(&volume_slider, window, |this, _, event: &SliderEvent, _window, cx| {
+            let target_vol = match event {
+                SliderEvent::Change(val) | SliderEvent::Release(val) => val.start() as f64,
+            };
+            if let Some(ref mut pb) = this.active_playback {
+                pb.status.volume = target_vol;
+                if let Some(ref ctrl) = pb.controller {
+                    let _ = ctrl.set_volume(target_vol);
+                }
+            }
+            cx.notify();
+        });
+
         let mut view = Self {
             search_input,
             episode_search_input,
@@ -141,9 +212,14 @@ impl SearchView {
             current_page: CurrentPage::Browse,
             active_playback: None,
             is_loading: true,
+            is_player_fullscreen: false,
+            last_mouse_activity: std::time::Instant::now(),
+            seek_slider,
+            volume_slider,
+            is_seeking_drag: false,
             theme_picker: None,
             focus_handle,
-            _subscriptions: vec![search_sub, ep_sub],
+            _subscriptions: vec![search_sub, ep_sub, seek_sub, vol_sub],
         };
 
 
@@ -260,6 +336,9 @@ impl SearchView {
                         }
                     }).ok();
                 }).detach();
+            }
+            CurrentPage::EmbeddedPlayer { .. } => {
+                cx.notify();
             }
             CurrentPage::History => {
                 cx.notify();
@@ -437,110 +516,211 @@ impl SearchView {
     }
 
     pub fn switch_provider(&mut self, new_provider: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let CurrentPage::AnimeDetails {
-            item,
-            scraped_episodes,
-            selected_provider,
-            provider_anime_id,
-            selected_audio,
-            is_loading_episodes,
-            ..
-        } = &mut self.current_page
-        {
-            *selected_provider = new_provider.to_string();
-            *provider_anime_id = None;
-            scraped_episodes.clear();
-            *is_loading_episodes = true;
-            self.current_episode_page = 1;
-            cx.notify();
+        let mut play_req = None;
 
-            let title = item.display_title().to_string();
-            let prov = new_provider.to_string();
-            let audio_type = selected_audio.to_audio_type();
-            let service = Arc::clone(&self.stream_service);
+        match &mut self.current_page {
+            CurrentPage::AnimeDetails {
+                item,
+                scraped_episodes,
+                selected_provider,
+                provider_anime_id,
+                selected_audio,
+                is_loading_episodes,
+                ..
+            } => {
+                if *is_loading_episodes {
+                    return;
+                }
+                *selected_provider = new_provider.to_string();
+                *provider_anime_id = None;
+                scraped_episodes.clear();
+                *is_loading_episodes = true;
+                self.current_episode_page = 1;
+                cx.notify();
 
-            cx.spawn_in(window, async move |this, cx| {
-                let res = service.fetch_episodes(&title, &prov, audio_type).await;
-                this.update_in(cx, |this, _window, cx| {
-                    if let CurrentPage::AnimeDetails {
-                        scraped_episodes,
-                        provider_anime_id,
-                        is_loading_episodes,
-                        ..
-                    } = &mut this.current_page
-                    {
-                        if let Ok((aid, episodes)) = res {
-                            *scraped_episodes = episodes;
-                            *provider_anime_id = Some(aid);
-                        } else {
-                            scraped_episodes.clear();
+                let title = item.display_title().to_string();
+                let prov = new_provider.to_string();
+                let audio_type = selected_audio.to_audio_type();
+                let service = Arc::clone(&self.stream_service);
+
+                cx.spawn_in(window, async move |this, cx| {
+                    let res = service.fetch_episodes(&title, &prov, audio_type).await;
+                    this.update_in(cx, |this, _window, cx| {
+                        if let CurrentPage::AnimeDetails {
+                            scraped_episodes,
+                            provider_anime_id,
+                            is_loading_episodes,
+                            ..
+                        } = &mut this.current_page
+                        {
+                            if let Ok((aid, episodes)) = res {
+                                *scraped_episodes = episodes;
+                                *provider_anime_id = Some(aid);
+                            } else {
+                                scraped_episodes.clear();
+                            }
+                            *is_loading_episodes = false;
+                            cx.notify();
                         }
-                        *is_loading_episodes = false;
-                        cx.notify();
-                    }
-                }).ok();
-            }).detach();
+                    }).ok();
+                }).detach();
+            }
+            CurrentPage::EmbeddedPlayer {
+                anime_item,
+                ep_number,
+                provider,
+                audio,
+                resolution,
+                is_loading,
+                ..
+            } => {
+                let item_clone = anime_item.clone();
+                let ep_num = *ep_number;
+                let prov = new_provider.to_string();
+                let aud_str = audio.clone();
+                let aud_type = match aud_str.as_str() {
+                    "dub" => AudioType::Dub,
+                    "hindi" => AudioType::Hindi,
+                    _ => AudioType::Sub,
+                };
+                let res = resolution.clone();
+
+                *provider = prov.clone();
+                *is_loading = true;
+                cx.notify();
+
+                play_req = Some((item_clone, ep_num, prov, aud_type, res));
+            }
+            _ => {}
+        }
+
+        if let Some((item_clone, ep_num, prov, aud_type, res)) = play_req {
+            self.play_episode(
+                &item_clone.id,
+                item_clone.display_title(),
+                ep_num,
+                None,
+                &prov,
+                aud_type,
+                &res,
+                item_clone.cover_image.clone(),
+                window,
+                cx,
+            );
         }
     }
 
     pub fn switch_audio(&mut self, new_audio: SelectedAudio, window: &mut Window, cx: &mut Context<Self>) {
-        if let CurrentPage::AnimeDetails {
-            item,
-            scraped_episodes,
-            selected_provider,
-            provider_anime_id,
-            selected_audio,
-            is_loading_episodes,
-            ..
-        } = &mut self.current_page
-        {
-            *selected_audio = new_audio.clone();
+        let mut play_req = None;
 
-            // Automatically adapt provider for Hindi Dub
-            if new_audio == SelectedAudio::Hindi
-                && *selected_provider != "animeworldindia"
-                && *selected_provider != "desidubanime"
-                && *selected_provider != "muse_india"
-            {
-                *selected_provider = "animeworldindia".to_string();
-            } else if new_audio != SelectedAudio::Hindi
-                && (*selected_provider == "animeworldindia" || *selected_provider == "desidubanime")
-            {
-                *selected_provider = "hianime".to_string();
-            }
+        match &mut self.current_page {
+            CurrentPage::AnimeDetails {
+                item,
+                scraped_episodes,
+                selected_provider,
+                provider_anime_id,
+                selected_audio,
+                is_loading_episodes,
+                ..
+            } => {
+                if *is_loading_episodes {
+                    return;
+                }
+                *selected_audio = new_audio.clone();
 
-            *provider_anime_id = None;
-            scraped_episodes.clear();
-            *is_loading_episodes = true;
-            self.current_episode_page = 1;
-            cx.notify();
+                // Automatically adapt provider for Hindi Dub
+                if new_audio == SelectedAudio::Hindi
+                    && *selected_provider != "animeworldindia"
+                    && *selected_provider != "desidubanime"
+                    && *selected_provider != "muse_india"
+                {
+                    *selected_provider = "animeworldindia".to_string();
+                } else if new_audio != SelectedAudio::Hindi
+                    && (*selected_provider == "animeworldindia" || *selected_provider == "desidubanime")
+                {
+                    *selected_provider = "hianime".to_string();
+                }
 
-            let title = item.display_title().to_string();
-            let prov = selected_provider.clone();
-            let audio_type = new_audio.to_audio_type();
-            let service = Arc::clone(&self.stream_service);
+                *provider_anime_id = None;
+                scraped_episodes.clear();
+                *is_loading_episodes = true;
+                self.current_episode_page = 1;
+                cx.notify();
 
-            cx.spawn_in(window, async move |this, cx| {
-                let res = service.fetch_episodes(&title, &prov, audio_type).await;
-                this.update_in(cx, |this, _window, cx| {
-                    if let CurrentPage::AnimeDetails {
-                        scraped_episodes,
-                        provider_anime_id,
-                        is_loading_episodes,
-                        ..
-                    } = &mut this.current_page
-                    {
-                        if let Ok((aid, episodes)) = res {
-                            *scraped_episodes = episodes;
-                            *provider_anime_id = Some(aid);
-                        } else {
-                            scraped_episodes.clear();
+                let title = item.display_title().to_string();
+                let prov = selected_provider.clone();
+                let audio_type = new_audio.to_audio_type();
+                let service = Arc::clone(&self.stream_service);
+
+                cx.spawn_in(window, async move |this, cx| {
+                    let res = service.fetch_episodes(&title, &prov, audio_type).await;
+                    this.update_in(cx, |this, _window, cx| {
+                        if let CurrentPage::AnimeDetails {
+                            scraped_episodes,
+                            provider_anime_id,
+                            is_loading_episodes,
+                            ..
+                        } = &mut this.current_page
+                        {
+                            if let Ok((aid, episodes)) = res {
+                                *scraped_episodes = episodes;
+                                *provider_anime_id = Some(aid);
+                            } else {
+                                scraped_episodes.clear();
+                            }
+                            *is_loading_episodes = false;
+                            cx.notify();
                         }
-                        *is_loading_episodes = false;
-                        cx.notify();
-                    }
-                }).ok();
-            }).detach();
+                    }).ok();
+                }).detach();
+            }
+            CurrentPage::EmbeddedPlayer {
+                anime_item,
+                ep_number,
+                provider,
+                audio,
+                resolution,
+                is_loading,
+                ..
+            } => {
+                let item_clone = anime_item.clone();
+                let ep_num = *ep_number;
+                let mut prov = provider.clone();
+                if new_audio == SelectedAudio::Hindi
+                    && prov != "animeworldindia"
+                    && prov != "desidubanime"
+                    && prov != "muse_india"
+                {
+                    prov = "animeworldindia".to_string();
+                    *provider = prov.clone();
+                } else if new_audio != SelectedAudio::Hindi
+                    && (prov == "animeworldindia" || prov == "desidubanime")
+                {
+                    prov = "hianime".to_string();
+                    *provider = prov.clone();
+                }
+                *audio = new_audio.to_string();
+                *is_loading = true;
+                cx.notify();
+
+                play_req = Some((item_clone, ep_num, prov, new_audio.to_audio_type(), resolution.clone()));
+            }
+            _ => {}
+        }
+
+        if let Some((item_clone, ep_num, prov, aud_type, res)) = play_req {
+            self.play_episode(
+                &item_clone.id,
+                item_clone.display_title(),
+                ep_num,
+                None,
+                &prov,
+                aud_type,
+                &res,
+                item_clone.cover_image.clone(),
+                window,
+                cx,
+            );
         }
     }
 
@@ -643,38 +823,110 @@ impl SearchView {
         let res = resolution.to_string();
         let history = self.watch_history.clone();
         let anime_id = anime_id.to_string();
-        let cover = cover_image.clone();
-
-        window.push_notification(format!("Opening {} - Episode {:.0}", title, ep_number), cx);
+        if let Some(ref pb) = self.active_playback {
+            if let Some(ref ctrl) = pb.controller {
+                let _ = ctrl.quit();
+            }
+        }
+        self.active_playback = None;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PlayerEvent>();
 
         let ep_title = format!("{} - Episode {:.0}", title, ep_number);
         let title_c = ep_title.clone();
         let aid_c = anime_id.clone();
-        let cov_c = cover.clone();
+        let cov_c = cover_image.clone();
         let hist_c = history.clone();
+
+        let service_prefetch = Arc::clone(&service);
+        let prov_c = prov.clone();
+        let title_prefetch = title.clone();
+        let mut has_prefetched_next = false;
 
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = rx.recv().await {
                 this.update_in(cx, |this, _window, cx| {
-                    match &event {
+                    match event {
                         PlayerEvent::Started(controller) => {
-                            this.active_playback = Some(ActivePlaybackState {
-                                title: title_c.clone(),
-                                controller: Some(controller.clone()),
-                                status: PlaybackStatus::default(),
-                            });
+                            if let Some(ref mut pb) = this.active_playback {
+                                pb.controller = Some(PlayerController::Socket(controller.clone()));
+                            } else {
+                                this.active_playback = Some(ActivePlaybackState {
+                                    title: title_c.clone(),
+                                    controller: Some(PlayerController::Socket(controller.clone())),
+                                    status: PlaybackStatus::default(),
+                                    current_frame: None,
+                                    error: None,
+                                });
+                            }
                             cx.notify();
+                        }
+                        PlayerEvent::EmbeddedStarted(handle) => {
+                            if let Some(ref mut pb) = this.active_playback {
+                                pb.controller = Some(PlayerController::Embedded(handle.clone()));
+                            } else {
+                                this.active_playback = Some(ActivePlaybackState {
+                                    title: title_c.clone(),
+                                    controller: Some(PlayerController::Embedded(handle.clone())),
+                                    status: PlaybackStatus::default(),
+                                    current_frame: None,
+                                    error: None,
+                                });
+                            }
+                            cx.notify();
+                        }
+                        PlayerEvent::FrameReady(frame) => {
+                            let img_buf = image::RgbaImage::from_raw(frame.width, frame.height, frame.data);
+                            if let Some(buf) = img_buf {
+                                let render_img = Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buf)]));
+                                if let Some(ref mut playback) = this.active_playback {
+                                    playback.current_frame = Some(render_img);
+                                } else {
+                                    this.active_playback = Some(ActivePlaybackState {
+                                        title: title_c.clone(),
+                                        controller: None,
+                                        status: PlaybackStatus::default(),
+                                        current_frame: Some(render_img),
+                                        error: None,
+                                    });
+                                }
+                                if let CurrentPage::EmbeddedPlayer { is_loading, .. } = &mut this.current_page {
+                                    *is_loading = false;
+                                }
+                                cx.notify();
+                            }
                         }
                         PlayerEvent::StatusUpdate(status) => {
                             if let Some(ref mut playback) = this.active_playback {
                                 playback.status = status.clone();
-                                cx.notify();
                             }
+                            if let CurrentPage::EmbeddedPlayer { is_loading, .. } = &mut this.current_page {
+                                if this.active_playback.as_ref().map_or(false, |p| p.current_frame.is_some()) {
+                                    *is_loading = false;
+                                }
+                            }
+                            if status.duration_secs > 0.0 {
+                                let dur = status.duration_secs as f32;
+                                let pos = status.position_secs as f32;
+                                this.seek_slider.update(cx, |s, cx| {
+                                    if (s.max_value() - dur).abs() > 0.5 {
+                                        *s = SliderState::new().min(0.0).max(dur).step(0.1).default_value(pos);
+                                    } else if !this.is_seeking_drag {
+                                        s.set_value(pos, _window, cx);
+                                    }
+                                });
+                            }
+                            let vol = status.volume as f32;
+                            this.volume_slider.update(cx, |s, cx| {
+                                s.set_value(vol, _window, cx);
+                            });
+                            cx.notify();
                         }
                         PlayerEvent::Finished | PlayerEvent::Error(_) => {
                             this.active_playback = None;
+                            if let CurrentPage::EmbeddedPlayer { is_loading, .. } = &mut this.current_page {
+                                *is_loading = false;
+                            }
                             cx.notify();
                         }
                         PlayerEvent::Progress(pct) => {
@@ -684,8 +936,19 @@ impl SearchView {
                                 &title_c,
                                 None,
                                 cov_c.as_deref(),
-                                *pct,
+                                pct,
                             );
+                            if pct >= 80.0 && !has_prefetched_next {
+                                has_prefetched_next = true;
+                                let s_pf = Arc::clone(&service_prefetch);
+                                let t_pf = title_prefetch.clone();
+                                let p_pf = prov_c.clone();
+                                let next_ep_num = ep_number + 1.0;
+                                tokio::spawn(async move {
+                                    eprintln!("[silvani-ui] Pre-fetching stream for next episode ({:.0}) in background...", next_ep_num);
+                                    let _ = s_pf.resolve_stream(&t_pf, &p_pf, None, next_ep_num, audio_type).await;
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -698,8 +961,13 @@ impl SearchView {
         });
 
         cx.spawn_in(window, async move |this, cx| {
+            eprintln!(
+                "[silvani-ui] Resolving stream: anime='{}', ep={:.0}, provider={}, audio={:?}, res={}",
+                title, ep_number, prov, audio_type, res
+            );
             let play_res = if prov == "muse_india" || prov == "ani_one_asia" {
                 if let Some(eid) = ep_id {
+                    eprintln!("[silvani-ui] Launching YouTube player with eid: {}", eid);
                     player.play_youtube(
                         &format!("{} - Episode {:.0}", title, ep_number),
                         &eid,
@@ -710,6 +978,7 @@ impl SearchView {
                     let (_aid, eps) = service.fetch_episodes(&title, &prov, audio_type).await.unwrap_or_default();
                     let target_ep = eps.iter().find(|e| (e.number - ep_number).abs() < 0.1).or_else(|| eps.first());
                     if let Some(ep) = target_ep {
+                        eprintln!("[silvani-ui] Launching YouTube player with fetched ep id: {}", ep.id);
                         player.play_youtube(
                             &format!("{} - Episode {:.0}", title, ep.number),
                             &ep.id,
@@ -717,36 +986,88 @@ impl SearchView {
                             on_event,
                         )
                     } else {
+                        eprintln!("[silvani-ui] No YouTube episodes found");
                         Err(silvani_player::PlayerError::NoStreams)
                     }
                 }
             } else {
-                match service.resolve_stream(&title, &prov, ep_id.as_deref(), ep_number, audio_type).await {
-                    Ok(source) => player.play_stream(
-                        &format!("{} - Episode {:.0}", title, ep_number),
-                        &source,
-                        Some(&res),
-                        on_event,
-                    ),
-                    Err(e) => Err(silvani_player::PlayerError::ProcessSpawn(
-                        std::io::Error::other(e.to_string()),
-                    )),
+                let resolve_fut = service.resolve_stream(&title, &prov, ep_id.as_deref(), ep_number, audio_type);
+                match tokio::time::timeout(std::time::Duration::from_secs(15), resolve_fut).await {
+                    Ok(Ok(source)) => {
+                        let stream_url = source.streams.first().map(|s| s.url.as_str()).unwrap_or("none");
+                        eprintln!(
+                            "[silvani-ui] Stream resolved successfully! streams: {}, first url: {}, subs: {}",
+                            source.streams.len(),
+                            stream_url,
+                            source.subtitles.len()
+                        );
+                        player.play_stream(
+                            &format!("{} - Episode {:.0}", title, ep_number),
+                            &source,
+                            Some(&res),
+                            on_event,
+                        )
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[silvani-ui] Stream resolve failed: {}", e);
+                        Err(silvani_player::PlayerError::ProcessSpawn(
+                            std::io::Error::other(e.to_string()),
+                        ))
+                    }
+                    Err(_) => {
+                        eprintln!("[silvani-ui] Stream resolve timed out after 15 seconds");
+                        Err(silvani_player::PlayerError::ProcessSpawn(
+                            std::io::Error::other("Stream resolve timed out (15s)"),
+                        ))
+                    }
                 }
             };
 
             if let Err(err) = play_res {
-                this.update_in(cx, |_this, window, cx| {
-                    window.push_notification(format!("Playback error: {err}"), cx);
+                eprintln!("[silvani-ui] Playback launch error: {:?}", err);
+                this.update_in(cx, |this, _window, cx| {
+                    if let CurrentPage::EmbeddedPlayer { is_loading, .. } = &mut this.current_page {
+                        *is_loading = false;
+                    }
+                    let err_str = match &err {
+                        silvani_player::PlayerError::NoStreams => "Failed to load stream: No streams found".to_string(),
+                        _ => "Failed to load stream".to_string(),
+                    };
+                    if let Some(ref mut pb) = this.active_playback {
+                        pb.error = Some(err_str);
+                    } else {
+                        this.active_playback = Some(ActivePlaybackState {
+                            title: title.clone(),
+                            controller: None,
+                            status: PlaybackStatus::default(),
+                            current_frame: None,
+                            error: Some(err_str),
+                        });
+                    }
+                    cx.notify();
                 }).ok();
             }
         }).detach();
     }
 
+    pub fn toggle_player_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_player_fullscreen = !self.is_player_fullscreen;
+        if self.is_player_fullscreen {
+            if !window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+        } else {
+            if window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for SearchView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let content = match &self.current_page {
             CurrentPage::Browse => {
                 BrowseView::new(
@@ -814,6 +1135,29 @@ impl Render for SearchView {
                     cx.notify();
                 }))
                 .on_play_episode(cx.listener(move |this, req: &PlayEpisodeRequest, window, cx| {
+                    eprintln!(
+                        "[silvani-ui] Episode clicked: anime='{}' (id: {}), ep={:.0}, provider={}, audio={:?}, res={}",
+                        anime_title, anime_id, req.number, req.provider, req.audio, req.resolution
+                    );
+                    if let CurrentPage::AnimeDetails { item, scraped_episodes, .. } = &this.current_page {
+                        let eps = scraped_episodes.clone();
+                        let a_item = item.clone();
+                        let target_ep = eps.iter().find(|e| (e.number - req.number).abs() < 0.1);
+                        let ep_title = target_ep.and_then(|e| e.title.clone()).unwrap_or_else(|| format!("Episode {:.0}", req.number));
+                        
+                        this.current_page = CurrentPage::EmbeddedPlayer {
+                            anime_item: a_item,
+                            episodes: eps,
+                            ep_number: req.number,
+                            ep_title,
+                            provider: req.provider.clone(),
+                            audio: req.audio.to_string(),
+                            resolution: req.resolution.clone(),
+                            is_loading: true,
+                        };
+                        cx.notify();
+                    }
+
                     this.play_episode(
                         &anime_id,
                         &anime_title,
@@ -855,6 +1199,143 @@ impl Render for SearchView {
                         *selected_resolution = new_res.to_string();
                         cx.notify();
                     }
+                }))
+                .into_any_element()
+            }
+            CurrentPage::EmbeddedPlayer {
+                anime_item,
+                episodes,
+                ep_number,
+                ep_title,
+                provider,
+                audio,
+                resolution,
+                is_loading,
+            } => {
+                let status = self.active_playback.as_ref().map(|p| p.status.clone()).unwrap_or_default();
+                let controller = self.active_playback.as_ref().and_then(|p| p.controller.clone());
+                let current_frame = self.active_playback.as_ref().and_then(|p| p.current_frame.clone());
+                let a_item = (**anime_item).clone();
+                let eps = episodes.clone();
+                let prov = provider.clone();
+                let aud = audio.clone();
+                let res = resolution.clone();
+
+                let a_back = a_item.clone();
+                let a_switch = a_item.clone();
+
+                let is_hud_visible = self.last_mouse_activity.elapsed() < std::time::Duration::from_millis(2500) || status.paused;
+
+
+
+                let pb_error = self.active_playback.as_ref().and_then(|p| p.error.clone());
+
+                let ep_retry_anime = a_item.clone();
+                let ep_retry_ep_num = *ep_number;
+                let ep_retry_prov = prov.clone();
+                let ep_retry_aud_type = match aud.to_lowercase().as_str() {
+                    "dub" => AudioType::Dub,
+                    "hindi" => AudioType::Hindi,
+                    _ => AudioType::Sub,
+                };
+                let ep_retry_res = res.clone();
+
+                EmbeddedPlayerView::new(
+                    a_item,
+                    *ep_number,
+                    ep_title.clone(),
+                    prov.clone(),
+                    aud.clone(),
+                    res.clone(),
+                    status,
+                    controller,
+                    current_frame,
+                    *is_loading,
+                    self.is_player_fullscreen,
+                    is_hud_visible,
+                    pb_error,
+                    self.is_seeking_drag,
+                    eps.clone(),
+                    Arc::clone(&self.image_cache),
+                    self.seek_slider.clone(),
+                    self.volume_slider.clone(),
+                )
+                .on_retry(cx.listener(move |this: &mut SearchView, _, window, cx| {
+                    this.play_episode(
+                        &ep_retry_anime.id,
+                        ep_retry_anime.display_title(),
+                        ep_retry_ep_num,
+                        None,
+                        &ep_retry_prov,
+                        ep_retry_aud_type,
+                        &ep_retry_res,
+                        ep_retry_anime.cover_image.clone(),
+                        window,
+                        cx,
+                    );
+                }))
+                .on_mouse_move(cx.listener(|this, _, _window, cx| {
+                    let was_hud_visible = this.last_mouse_activity.elapsed() < std::time::Duration::from_millis(2500);
+                    this.last_mouse_activity = std::time::Instant::now();
+                    if !was_hud_visible {
+                        cx.notify();
+                    }
+                }))
+                .on_toggle_fullscreen(cx.listener(|this, _, window, cx| {
+                    this.toggle_player_fullscreen(window, cx);
+                }))
+                .on_back(cx.listener(move |this: &mut SearchView, _, window, cx| {
+                    if this.is_player_fullscreen {
+                        this.is_player_fullscreen = false;
+                        window.toggle_fullscreen();
+                    }
+                    if let Some(ref pb) = this.active_playback {
+                        if let Some(ref ctrl) = pb.controller {
+                            let _ = ctrl.quit();
+                        }
+                    }
+                    this.active_playback = None;
+                    this.open_anime_details(a_back.clone(), window, cx);
+                }))
+                .on_switch_episode(cx.listener(move |this: &mut SearchView, target_ep: &f32, window, cx| {
+                    let ep_val = *target_ep;
+                    let aid = a_switch.id.clone();
+                    let atitle = a_switch.display_title().to_string();
+                    let cover = a_switch.cover_image.clone();
+                    let ep_obj = eps.iter().find(|e| (e.number - ep_val).abs() < 0.1);
+                    let eid = ep_obj.map(|e| e.id.clone());
+                    let etitle = ep_obj.and_then(|e| e.title.clone()).unwrap_or_else(|| format!("Episode {:.0}", ep_val));
+
+                    let aud_type = match aud.to_lowercase().as_str() {
+                        "dub" => AudioType::Dub,
+                        "hindi" => AudioType::Hindi,
+                        _ => AudioType::Sub,
+                    };
+
+                    this.current_page = CurrentPage::EmbeddedPlayer {
+                        anime_item: Box::new(a_switch.clone()),
+                        episodes: eps.clone(),
+                        ep_number: ep_val,
+                        ep_title: etitle,
+                        provider: prov.clone(),
+                        audio: aud.clone(),
+                        resolution: res.clone(),
+                        is_loading: true,
+                    };
+                    cx.notify();
+
+                    this.play_episode(
+                        &aid,
+                        &atitle,
+                        ep_val,
+                        eid,
+                        &prov,
+                        aud_type,
+                        &res,
+                        cover,
+                        window,
+                        cx,
+                    );
                 }))
                 .into_any_element()
             }
@@ -933,6 +1414,69 @@ impl Render for SearchView {
             .on_action(cx.listener(|this, _: &ReloadApp, window, cx| {
                 this.reload(window, cx);
             }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(this.current_page, CurrentPage::EmbeddedPlayer { .. }) {
+                    let key = event.keystroke.key.to_lowercase();
+                    match key.as_str() {
+                        "f" | "f11" => {
+                            this.toggle_player_fullscreen(window, cx);
+                        }
+                        "escape" => {
+                            if this.is_player_fullscreen {
+                                this.toggle_player_fullscreen(window, cx);
+                            }
+                        }
+                        _ => {
+                            if let Some(ref pb) = this.active_playback {
+                                if let Some(ref ctrl) = pb.controller {
+                                    match key.as_str() {
+                                        "space" | " " => {
+                                            let _ = ctrl.toggle_pause();
+                                            cx.notify();
+                                        }
+                                        "left" | "arrowleft" => {
+                                            let _ = ctrl.seek_relative(-10.0);
+                                            cx.notify();
+                                        }
+                                        "right" | "arrowright" => {
+                                            let _ = ctrl.seek_relative(10.0);
+                                            cx.notify();
+                                        }
+                                        "up" | "arrowup" => {
+                                            let cur = ctrl.get_status().volume;
+                                            let new_vol = (cur + 5.0).min(100.0);
+                                            let _ = ctrl.set_volume(new_vol);
+                                            if let Some(ref mut pb_mut) = this.active_playback {
+                                                pb_mut.status.volume = new_vol;
+                                            }
+                                            cx.notify();
+                                        }
+                                        "down" | "arrowdown" => {
+                                            let cur = ctrl.get_status().volume;
+                                            let new_vol = (cur - 5.0).max(0.0);
+                                            let _ = ctrl.set_volume(new_vol);
+                                            if let Some(ref mut pb_mut) = this.active_playback {
+                                                pb_mut.status.volume = new_vol;
+                                            }
+                                            cx.notify();
+                                        }
+                                        "m" => {
+                                            let cur = ctrl.get_status().volume;
+                                            let new_vol = if cur > 0.0 { 0.0 } else { 100.0 };
+                                            let _ = ctrl.set_volume(new_vol);
+                                            if let Some(ref mut pb_mut) = this.active_playback {
+                                                pb_mut.status.volume = new_vol;
+                                            }
+                                            cx.notify();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
             .child(
                 div()
                     .flex_1()
@@ -979,7 +1523,7 @@ impl Render for SearchView {
             );
         }
 
-        if let Some(ref playback) = self.active_playback {
+        if !matches!(self.current_page, CurrentPage::EmbeddedPlayer { .. }) && let Some(ref playback) = self.active_playback {
             let title = playback.title.clone();
             let status = playback.status.clone();
             let controller = playback.controller.clone();
@@ -997,7 +1541,7 @@ impl Render for SearchView {
                             .on_close(cx.listener(|this, _, _window, cx| {
                                 if let Some(ref playback) = this.active_playback {
                                     if let Some(ref ctrl) = playback.controller {
-                                        let _ = ctrl.send_command(serde_json::json!(["quit"]));
+                                        let _ = ctrl.quit();
                                     }
                                 }
                                 this.active_playback = None;

@@ -159,7 +159,7 @@ impl AnimeProvider for HiAnimeProvider {
                 .map(|m| format!("{m}/api/theme/episode/servers?episodeId={episode_id}"))
                 .collect();
 
-            let (server_base_url, resp): (String, serde_json::Value) =
+            let (_server_base_url, resp): (String, serde_json::Value) =
                 self.client.get_json_with_mirrors(&urls, None).await?;
 
             let html = resp["html"]
@@ -242,10 +242,12 @@ impl AnimeProvider for HiAnimeProvider {
                     url: payload.src,
                 }],
                 subtitles,
-                referer: if server_base_url.contains("zokoanime") {
+                referer: if embed_url.contains("zokoanime") {
                     "https://zokoanime.video/".to_string()
-                } else {
+                } else if embed_url.contains("megacloud") {
                     "https://megacloud.tv/".to_string()
+                } else {
+                    embed_url.split('/').take(3).collect::<Vec<_>>().join("/") + "/"
                 },
             })
         })

@@ -17,12 +17,26 @@ pub enum SelectedAudio {
 }
 
 impl SelectedAudio {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sub => "sub",
+            Self::Dub => "dub",
+            Self::Hindi => "hindi",
+        }
+    }
+
     pub fn to_audio_type(&self) -> AudioType {
         match self {
             Self::Sub => AudioType::Sub,
             Self::Dub => AudioType::Dub,
             Self::Hindi => AudioType::Hindi,
         }
+    }
+}
+
+impl std::fmt::Display for SelectedAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

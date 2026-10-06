@@ -8,7 +8,7 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use silvani_player::{MpvController, PlaybackStatus};
+use silvani_player::{PlaybackStatus, PlayerController};
 
 pub type ControlHandler = Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>;
 
@@ -17,7 +17,7 @@ pub struct VideoPlayerControls {
     id: ElementId,
     title: String,
     status: PlaybackStatus,
-    controller: Option<MpvController>,
+    controller: Option<PlayerController>,
     on_close: ControlHandler,
 }
 
@@ -32,7 +32,7 @@ impl VideoPlayerControls {
         }
     }
 
-    pub fn controller(mut self, controller: Option<MpvController>) -> Self {
+    pub fn controller(mut self, controller: Option<PlayerController>) -> Self {
         self.controller = controller;
         self
     }

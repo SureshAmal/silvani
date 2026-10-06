@@ -22,6 +22,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
+image = { version = "0.25.10", default-features = false }
+smallvec = "1.16.2"
+libloading = "0.8.9"
 gpui-kit = "0.7.0"
 gpui-pre-reqwest-client = "0.3.7"
 silvani-scraper = { path = "crates/silvani-scraper" }

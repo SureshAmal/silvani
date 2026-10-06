@@ -7,23 +7,130 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use silvani_scraper::models::{StreamSource, SubtitleTrack};
 
+pub mod embedded;
+pub use embedded::{EmbeddedPlayerHandle, EmbeddedVideoEngine, VideoFrame};
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Opening,
     Started(MpvController),
+    EmbeddedStarted(EmbeddedPlayerHandle),
+    FrameReady(VideoFrame),
     Progress(f32),
     StatusUpdate(PlaybackStatus),
     Finished,
     Error(String),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PlaybackStatus {
     pub position_secs: f64,
     pub duration_secs: f64,
     pub paused: bool,
     pub volume: f64,
     pub sub_track: Option<String>,
+    pub is_buffering: bool,
+}
+
+impl Default for PlaybackStatus {
+    fn default() -> Self {
+        Self {
+            position_secs: 0.0,
+            duration_secs: 0.0,
+            paused: false,
+            volume: 100.0,
+            sub_track: None,
+            is_buffering: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum PlayerController {
+    Socket(MpvController),
+    Embedded(EmbeddedPlayerHandle),
+}
+
+impl PlayerController {
+    pub fn play(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.play(),
+            Self::Embedded(h) => h.play(),
+        }
+    }
+
+    pub fn pause(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.pause(),
+            Self::Embedded(h) => h.pause(),
+        }
+    }
+
+    pub fn toggle_pause(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.toggle_pause(),
+            Self::Embedded(h) => h.toggle_pause(),
+        }
+    }
+
+    pub fn seek_absolute(&self, secs: f64) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.seek_absolute(secs),
+            Self::Embedded(h) => h.seek_absolute(secs),
+        }
+    }
+
+    pub fn seek_relative(&self, secs: f64) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.seek_relative(secs),
+            Self::Embedded(h) => h.seek_relative(secs),
+        }
+    }
+
+    pub fn set_volume(&self, vol: f64) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.set_volume(vol),
+            Self::Embedded(h) => h.set_volume(vol),
+        }
+    }
+
+    pub fn get_status(&self) -> PlaybackStatus {
+        match self {
+            Self::Socket(c) => c.get_status(),
+            Self::Embedded(h) => h.get_status(),
+        }
+    }
+
+    pub fn set_subtitle_track(&self, sid: &str) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.set_subtitle_track(sid),
+            Self::Embedded(h) => h.set_subtitle_track(sid),
+        }
+    }
+
+    pub fn toggle_subtitles(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.send_command(serde_json::json!(["cycle", "sub-visibility"])).map(|_| ()),
+            Self::Embedded(h) => h.toggle_subtitles(),
+        }
+    }
+
+    pub fn next_subtitle(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.send_command(serde_json::json!(["cycle", "sid"])).map(|_| ()),
+            Self::Embedded(h) => h.next_subtitle(),
+        }
+    }
+
+    pub fn quit(&self) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => {
+                let _ = c.send_command(serde_json::json!(["quit"]));
+                Ok(())
+            }
+            Self::Embedded(h) => h.quit(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +231,7 @@ impl MpvController {
             paused,
             volume: vol,
             sub_track: None,
+            is_buffering: false,
         }
     }
 }
@@ -177,6 +285,33 @@ impl MediaPlayer for MpvPlayer {
         let event_cb = Arc::clone(&on_event);
         event_cb(PlayerEvent::Opening);
 
+        let stream = if let Some(res) = resolution {
+            if res.eq_ignore_ascii_case("auto") {
+                source.streams.first()
+            } else {
+                source
+                    .streams
+                    .iter()
+                    .find(|s| s.quality.to_lowercase().contains(&res.to_lowercase()))
+                    .or_else(|| source.streams.first())
+            }
+        } else {
+            source.streams.first()
+        }
+        .ok_or(PlayerError::NoStreams)?;
+
+        // Try in-process embedded video engine (strictly in-app, zero external windows)
+        if let Ok(_handle) = EmbeddedVideoEngine::start_playback(
+            &stream.url,
+            Some(&source.referer),
+            &source.subtitles,
+            resolution,
+            Arc::clone(&on_event),
+        ) {
+            return Ok(());
+        }
+
+        // Fallback to standalone spawn if libmpv failed to load
         let event_cb_end = Arc::clone(&on_event);
         match MpvPlayer::play_stream_with_event_cb(title, source, resolution, on_event) {
             Ok(mut child) => {
@@ -202,6 +337,22 @@ impl MediaPlayer for MpvPlayer {
     ) -> Result<(), PlayerError> {
         let event_cb = Arc::clone(&on_event);
         event_cb(PlayerEvent::Opening);
+
+        let url = if video_id_or_url.starts_with("http") {
+            video_id_or_url.to_string()
+        } else {
+            format!("https://www.youtube.com/watch?v={}", video_id_or_url)
+        };
+
+        if let Ok(_handle) = EmbeddedVideoEngine::start_playback(
+            &url,
+            Some("https://www.youtube.com/"),
+            &[],
+            resolution,
+            Arc::clone(&on_event),
+        ) {
+            return Ok(());
+        }
 
         let event_cb_end = Arc::clone(&on_event);
         match MpvPlayer::play_youtube_with_event_cb(title, video_id_or_url, resolution, on_event) {
@@ -379,6 +530,12 @@ impl MpvPlayer {
         cmd.arg("--hwdec=auto-safe");
         cmd.arg("--vo=gpu-next,gpu");
         cmd.arg("--gpu-api=auto");
+        cmd.arg("--no-border");
+        cmd.arg("--no-osc");
+        cmd.arg("--osd-level=0");
+        cmd.arg("--keep-open=yes");
+
+        cmd.arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
 
         if let Some(res) = resolution
             && !res.eq_ignore_ascii_case("auto")
@@ -393,7 +550,8 @@ impl MpvPlayer {
 
         if let Some(ref_url) = referer {
             cmd.arg(format!("--referrer={}", ref_url));
-            cmd.arg(format!("--http-header-fields=Referer: {}", ref_url));
+            cmd.arg(format!("--http-header-fields=Referer: {},Origin: {}", ref_url, ref_url.trim_end_matches('/')));
+            cmd.arg(format!("--ytdl-raw-options=referer={},add-header=Origin:{}", ref_url, ref_url.trim_end_matches('/')));
         }
 
         for sub in subtitles {
