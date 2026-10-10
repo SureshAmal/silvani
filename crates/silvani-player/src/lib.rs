@@ -22,6 +22,67 @@ pub enum PlayerEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaTrack {
+    id: String,
+    label: String,
+    selected: bool,
+}
+
+impl MediaTrack {
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            selected: false,
+        }
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+/// Read MPV's actual track inventory, including externally attached subtitles.
+pub(crate) fn read_tracks(get: impl Fn(&str) -> Option<String>, kind: &str) -> Vec<MediaTrack> {
+    let count = get("track-list/count")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    (0..count)
+        .filter_map(|ix| {
+            let key = |field: &str| format!("track-list/{ix}/{field}");
+            if get(&key("type")).as_deref() != Some(kind) {
+                return None;
+            }
+            let id = get(&key("id"))?;
+            let title = get(&key("title")).filter(|s| !s.is_empty());
+            let language = get(&key("lang")).filter(|s| !s.is_empty());
+            let label = match (title, language) {
+                (Some(t), Some(l)) => format!("{t} ({l})"),
+                (Some(t), None) => t,
+                (None, Some(l)) => l,
+                _ => format!("Track {id}"),
+            };
+            Some(MediaTrack {
+                id,
+                label,
+                selected: get(&key("selected")).is_some_and(|v| v == "yes"),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct PlaybackStatus {
     pub position_secs: f64,
@@ -30,6 +91,9 @@ pub struct PlaybackStatus {
     pub volume: f64,
     pub sub_track: Option<String>,
     pub is_buffering: bool,
+    pub subtitles_visible: bool,
+    pub subtitle_tracks: Vec<MediaTrack>,
+    pub audio_tracks: Vec<MediaTrack>,
 }
 
 impl Default for PlaybackStatus {
@@ -41,6 +105,9 @@ impl Default for PlaybackStatus {
             volume: 100.0,
             sub_track: None,
             is_buffering: false,
+            subtitles_visible: true,
+            subtitle_tracks: Vec::new(),
+            audio_tracks: Vec::new(),
         }
     }
 }
@@ -108,16 +175,23 @@ impl PlayerController {
         }
     }
 
+    pub fn set_audio_track(&self, id: &str) -> Result<(), String> {
+        match self {
+            Self::Socket(c) => c.send_command(serde_json::json!({ "command": ["set_property", "aid", id] })).map(|_| ()),
+            Self::Embedded(h) => h.set_audio_track(id),
+        }
+    }
+
     pub fn toggle_subtitles(&self) -> Result<(), String> {
         match self {
-            Self::Socket(c) => c.send_command(serde_json::json!(["cycle", "sub-visibility"])).map(|_| ()),
+            Self::Socket(c) => c.send_command(serde_json::json!({"command": ["cycle", "sub-visibility"]})).map(|_| ()),
             Self::Embedded(h) => h.toggle_subtitles(),
         }
     }
 
     pub fn next_subtitle(&self) -> Result<(), String> {
         match self {
-            Self::Socket(c) => c.send_command(serde_json::json!(["cycle", "sid"])).map(|_| ()),
+            Self::Socket(c) => c.send_command(serde_json::json!({"command": ["cycle", "sid"]})).map(|_| ()),
             Self::Embedded(h) => h.next_subtitle(),
         }
     }
@@ -125,7 +199,7 @@ impl PlayerController {
     pub fn quit(&self) -> Result<(), String> {
         match self {
             Self::Socket(c) => {
-                let _ = c.send_command(serde_json::json!(["quit"]));
+                let _ = c.send_command(serde_json::json!({"command": ["quit"]}));
                 Ok(())
             }
             Self::Embedded(h) => h.quit(),
@@ -161,7 +235,11 @@ impl MpvController {
         let mut line = String::new();
         reader.read_line(&mut line).map_err(|e| e.to_string())?;
 
-        serde_json::from_str(&line).map_err(|e| e.to_string())
+        let response: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if response["error"].as_str().is_some_and(|error| error != "success") {
+            return Err(response["error"].as_str().unwrap_or("MPV command failed").to_string());
+        }
+        Ok(response)
     }
 
     pub fn play(&self) -> Result<(), String> {
@@ -180,7 +258,7 @@ impl MpvController {
     }
 
     pub fn seek_absolute(&self, secs: f64) -> Result<(), String> {
-        self.send_command(serde_json::json!({ "command": ["seek", secs, "absolute"] }))
+        self.send_command(serde_json::json!({ "command": ["seek", secs, "absolute+exact"] }))
             .map(|_| ())
     }
 
@@ -196,7 +274,8 @@ impl MpvController {
     }
 
     pub fn set_subtitle_track(&self, track_id: &str) -> Result<(), String> {
-        self.send_command(serde_json::json!({ "command": ["set_property", "sid", track_id] }))
+        self.send_command(serde_json::json!({ "command": ["set_property", "sid", track_id] }))?;
+        self.send_command(serde_json::json!({ "command": ["set_property", "sub-visibility", track_id != "no"] }))
             .map(|_| ())
     }
 
@@ -225,13 +304,37 @@ impl MpvController {
             .and_then(|v| v["data"].as_f64())
             .unwrap_or(100.0);
 
+        let get = |prop: &str| self.send_command(serde_json::json!({"command": ["get_property", prop]}))
+            .ok().and_then(|v| match &v["data"] {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(b) => Some(if *b { "yes" } else { "no" }.into()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            });
+        let inventory = self.send_command(serde_json::json!({"command": ["get_property", "track-list"]}))
+            .ok().and_then(|v| v.get("data").cloned()).unwrap_or(serde_json::Value::Null);
+        let track_property = |path: &str| {
+            if path == "track-list/count" { return inventory.as_array().map(|a| a.len().to_string()); }
+            let mut parts = path.strip_prefix("track-list/")?.split('/');
+            let ix = parts.next()?.parse::<usize>().ok()?;
+            let value = &inventory[ix][parts.next()?];
+            match value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(b) => Some(if *b { "yes" } else { "no" }.into()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            }
+        };
         PlaybackStatus {
             position_secs: pos,
             duration_secs: dur,
             paused,
             volume: vol,
-            sub_track: None,
-            is_buffering: false,
+            sub_track: get("sid"),
+            is_buffering: get("paused-for-cache").as_deref() == Some("yes"),
+            subtitles_visible: get("sub-visibility").as_deref() == Some("yes"),
+            subtitle_tracks: read_tracks(track_property, "sub"),
+            audio_tracks: read_tracks(track_property, "audio"),
         }
     }
 }
@@ -629,5 +732,87 @@ impl MpvPlayer {
         });
 
         Self::play_url_with_event_cb(title, url, referer, subtitles, resolution, event_cb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn track_inventory_preserves_mpv_ids_languages_and_selection() {
+        let properties: HashMap<&str, &str> = [
+            ("track-list/count", "4"),
+            ("track-list/0/type", "video"),
+            ("track-list/1/type", "audio"),
+            ("track-list/1/id", "2"),
+            ("track-list/1/lang", "eng"),
+            ("track-list/1/selected", "yes"),
+            ("track-list/2/type", "sub"),
+            ("track-list/2/id", "7"),
+            ("track-list/2/title", "English captions"),
+            ("track-list/2/lang", "eng"),
+            ("track-list/2/selected", "yes"),
+            ("track-list/3/type", "sub"),
+            ("track-list/3/id", "9"),
+        ]
+        .into();
+        let get = |key: &str| properties.get(key).map(|v| v.to_string());
+        let subtitles = read_tracks(get, "sub");
+        assert_eq!(subtitles.len(), 2);
+        assert_eq!(
+            subtitles[0],
+            MediaTrack {
+                id: "7".into(),
+                label: "English captions (eng)".into(),
+                selected: true
+            }
+        );
+        assert_eq!(subtitles[1].label, "Track 9");
+        assert!(!subtitles[1].selected);
+        assert_eq!(read_tracks(get, "audio")[0].label, "eng");
+        assert!(read_tracks(|_| None, "sub").is_empty());
+    }
+
+    #[test]
+    fn ipc_subtitle_selection_restores_visibility_and_rejects_mpv_errors() {
+        use std::os::unix::net::UnixListener;
+        let path =
+            std::env::temp_dir().join(format!("silvani-ipc-test-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = std::thread::spawn(move || {
+            let expected = [
+                serde_json::json!({"command": ["set_property", "sid", "7"]}),
+                serde_json::json!({"command": ["set_property", "sub-visibility", true]}),
+                serde_json::json!({"command": ["set_property", "sid", "no"]}),
+                serde_json::json!({"command": ["set_property", "sub-visibility", false]}),
+                serde_json::json!({"command": ["set_property", "aid", "99"]}),
+            ];
+            for (ix, command) in expected.iter().enumerate() {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&socket).read_line(&mut request).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&request).unwrap(),
+                    *command
+                );
+                let error = if ix == 4 {
+                    "property unavailable"
+                } else {
+                    "success"
+                };
+                writeln!(socket, "{}", serde_json::json!({"error": error})).unwrap();
+            }
+        });
+        let controller = PlayerController::Socket(MpvController::new(path.clone()));
+        controller.set_subtitle_track("7").unwrap();
+        controller.set_subtitle_track("no").unwrap();
+        assert_eq!(
+            controller.set_audio_track("99").unwrap_err(),
+            "property unavailable"
+        );
+        worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }

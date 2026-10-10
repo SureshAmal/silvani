@@ -18,6 +18,12 @@ pub const MPV_EVENT_FILE_LOADED: c_int = 8;
 pub const MPV_EVENT_END_FILE: c_int = 7;
 
 #[repr(C)]
+struct MpvEndFile {
+    reason: c_int,
+    error: c_int,
+}
+
+#[repr(C)]
 pub struct MpvRenderParam {
     pub param_type: c_int,
     pub data: *mut c_void,
@@ -182,6 +188,7 @@ pub enum PlayerCommand {
     SeekRelative(f64),
     SetVolume(f64),
     SetSubtitleTrack(String),
+    SetAudioTrack(String),
     ToggleSubtitles,
     NextSubtitle,
     Quit,
@@ -232,6 +239,10 @@ impl EmbeddedPlayerHandle {
 
     pub fn set_subtitle_track(&self, sid: &str) -> Result<(), String> {
         self.cmd_tx.send(PlayerCommand::SetSubtitleTrack(sid.to_string())).map_err(|e| e.to_string())
+    }
+
+    pub fn set_audio_track(&self, id: &str) -> Result<(), String> {
+        self.cmd_tx.send(PlayerCommand::SetAudioTrack(id.to_string())).map_err(|e| e.to_string())
     }
 
     pub fn toggle_subtitles(&self) -> Result<(), String> {
@@ -426,7 +437,7 @@ impl EmbeddedVideoEngine {
                         PlayerCommand::SeekAbsolute(secs) => {
                             let c_cmd = CString::new("seek").unwrap();
                             let c_arg1 = CString::new(secs.to_string()).unwrap();
-                            let c_arg2 = CString::new("absolute").unwrap();
+                            let c_arg2 = CString::new("absolute+exact").unwrap();
                             let mut ptrs = [c_cmd.as_ptr(), c_arg1.as_ptr(), c_arg2.as_ptr(), std::ptr::null()];
                             unsafe { (lib.mpv_command)(mpv, ptrs.as_mut_ptr()); }
                         }
@@ -443,9 +454,16 @@ impl EmbeddedVideoEngine {
                             unsafe { (lib.mpv_set_property_string)(mpv, c_p.as_ptr(), c_v.as_ptr()); }
                         }
                         PlayerCommand::SetSubtitleTrack(sid) => {
-                            if let Ok(c_v) = CString::new(sid) {
-                                let c_p = CString::new("sid").unwrap();
-                                unsafe { (lib.mpv_set_property_string)(mpv, c_p.as_ptr(), c_v.as_ptr()); }
+                            if let Ok(value) = CString::new(sid.clone()) {
+                                unsafe {
+                                    (lib.mpv_set_property_string)(mpv, c"sid".as_ptr(), value.as_ptr());
+                                    (lib.mpv_set_property_string)(mpv, c"sub-visibility".as_ptr(), if sid == "no" { c"no".as_ptr() } else { c"yes".as_ptr() });
+                                }
+                            }
+                        }
+                        PlayerCommand::SetAudioTrack(id) => {
+                            if let Ok(value) = CString::new(id) {
+                                unsafe { (lib.mpv_set_property_string)(mpv, c"aid".as_ptr(), value.as_ptr()); }
                             }
                         }
                         PlayerCommand::ToggleSubtitles => {
@@ -456,7 +474,7 @@ impl EmbeddedVideoEngine {
                         }
                         PlayerCommand::NextSubtitle => {
                             let c_cmd = CString::new("cycle").unwrap();
-                            let c_arg = CString::new("sub").unwrap();
+                            let c_arg = CString::new("sid").unwrap();
                             let mut ptrs = [c_cmd.as_ptr(), c_arg.as_ptr(), std::ptr::null()];
                             unsafe { (lib.mpv_command)(mpv, ptrs.as_mut_ptr()); }
                         }
@@ -482,7 +500,17 @@ impl EmbeddedVideoEngine {
                             on_event(PlayerEvent::EmbeddedStarted(handle_for_worker.clone()));
                         }
                     } else if ev_id == MPV_EVENT_END_FILE || ev_id == MPV_EVENT_SHUTDOWN {
-                        eprintln!("[silvani-player] MPV end of file / shutdown event: {}", ev_id);
+                        if ev_id == MPV_EVENT_END_FILE {
+                            // MPV keeps event data alive until the next mpv_wait_event call.
+                            unsafe {
+                                if !(*ev_ptr).data.is_null() {
+                                    let end = &*((*ev_ptr).data as *const MpvEndFile);
+                                    if end.reason == 4 {
+                                        on_event(PlayerEvent::Error(format!("MPV could not play this stream (error {}). Try another provider or retry.", end.error)));
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -568,7 +596,10 @@ impl EmbeddedVideoEngine {
                         duration_secs: dur,
                         paused,
                         volume: vol,
-                        sub_track: None,
+                        sub_track: get_str("sid"),
+                        subtitles_visible: get_str("sub-visibility").as_deref() == Some("yes"),
+                        subtitle_tracks: crate::read_tracks(get_str, "sub"),
+                        audio_tracks: crate::read_tracks(get_str, "audio"),
                         is_buffering: cache_buffering || seeking,
                     };
 

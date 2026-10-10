@@ -5,20 +5,51 @@ use std::sync::LazyLock;
 
 use crate::error::{Result, ScraperError};
 use crate::http::ScraperHttpClient;
-use crate::models::{AnimeSearchResult, AudioType, Episode, StreamSource, SubtitleTrack, VideoStream};
+use crate::models::{
+    AnimeSearchResult, AudioType, Episode, StreamSource, SubtitleTrack, VideoStream,
+};
 use crate::provider::{AnimeProvider, BoxFuture, ProviderMetadata, ProviderPriority};
 
 static SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"class="film-name">\s*<a href="[^"]*/([^"/]*)"\s*title="([^"]*)""#).unwrap()
 });
 
-static EP_ITEM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"data-number="([^"]*)"[^>]*data-id="([0-9]+)""#).unwrap()
+static EP_ITEM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<a\b[^>]*>"#).unwrap());
+static EP_ATTRIBUTE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:^|\s)(data-number|data-id|data-title|title)="([^"]*)""#).unwrap()
 });
 
-static BLOB_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"window\.__P="([^"]*)""#).unwrap()
-});
+fn parse_episode_list(html: &str) -> Vec<Episode> {
+    EP_ITEM_RE
+        .find_iter(html)
+        .filter_map(|anchor| {
+            let attributes: Vec<_> = EP_ATTRIBUTE_RE.captures_iter(anchor.as_str()).collect();
+            let attribute = |name: &str| {
+                attributes
+                    .iter()
+                    .find(|attribute| &attribute[1] == name)
+                    .map(|attribute| attribute[2].to_string())
+            };
+            let number = attribute("data-number")?.parse().ok()?;
+            let id = attribute("data-id")?;
+            let title = attribute("data-title")
+                .or_else(|| attribute("title"))
+                .filter(|title| !title.trim().is_empty())
+                .map(|title| {
+                    title
+                        .replace("&quot;", "\"")
+                        .replace("&#39;", "'")
+                        .replace("&apos;", "'")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&amp;", "&")
+                });
+            Some(Episode { id, number, title })
+        })
+        .collect()
+}
+
+static BLOB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"window\.__P="([^"]*)""#).unwrap());
 
 const XOR_KEY: &[u8] = b"otaku-embed-v1";
 const MIRRORS: &[&str] = &[
@@ -134,20 +165,15 @@ impl AnimeProvider for HiAnimeProvider {
             let (_effective_url, res): (String, EpisodeListResponse) =
                 self.client.get_json_with_mirrors(&urls, None).await?;
 
-            let mut episodes = Vec::new();
-            for cap in EP_ITEM_RE.captures_iter(&res.html) {
-                let num = cap[1].parse::<f32>().unwrap_or(0.0);
-                episodes.push(Episode {
-                    id: cap[2].to_string(),
-                    number: num,
-                    title: None,
-                });
-            }
-            Ok(episodes)
+            Ok(parse_episode_list(&res.html))
         })
     }
 
-    fn stream<'a>(&'a self, episode_id: &'a str, audio: AudioType) -> BoxFuture<'a, Result<StreamSource>> {
+    fn stream<'a>(
+        &'a self,
+        episode_id: &'a str,
+        audio: AudioType,
+    ) -> BoxFuture<'a, Result<StreamSource>> {
         Box::pin(async move {
             let mode_str = match audio {
                 AudioType::Dub => "dub",
@@ -191,7 +217,11 @@ impl AnimeProvider for HiAnimeProvider {
                 .find(|(t, _)| t == mode_str)
                 .or_else(|| servers.first())
                 .cloned()
-                .ok_or_else(|| ScraperError::NotFound(format!("No streaming server found for episode {episode_id}")))?;
+                .ok_or_else(|| {
+                    ScraperError::NotFound(format!(
+                        "No streaming server found for episode {episode_id}"
+                    ))
+                })?;
 
             let actual_audio = if actual_mode == "dub" {
                 AudioType::Dub
@@ -251,5 +281,20 @@ impl AnimeProvider for HiAnimeProvider {
                 },
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod episode_title_tests {
+    use super::parse_episode_list;
+    #[test]
+    fn retains_titles_and_accepts_reordered_episode_attributes() {
+        let episodes = parse_episode_list(
+            r#"<a title="A Captain &amp; His Crew" data-id="12" data-number="1">1</a><a data-number="2" data-id="13">2</a>"#,
+        );
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].title.as_deref(), Some("A Captain & His Crew"));
+        assert_eq!(episodes[0].id, "12");
+        assert!(episodes[1].title.is_none());
     }
 }

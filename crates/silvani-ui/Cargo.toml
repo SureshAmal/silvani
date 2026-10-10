@@ -17,3 +17,5 @@ notify = "7"
 image = { workspace = true }
 smallvec = { workspace = true }
 
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }

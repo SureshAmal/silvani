@@ -2,6 +2,7 @@ pub mod cache;
 pub mod engine;
 pub mod error;
 pub mod http;
+mod hls;
 pub mod models;
 pub mod provider;
 pub mod providers;

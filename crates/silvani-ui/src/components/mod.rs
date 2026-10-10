@@ -16,3 +16,6 @@ pub use stream_settings_bar::{SelectedAudio, StreamSettingsBar};
 pub use theme_picker::{ThemePickerDelegate, ThemePickerState};
 pub use video_player_controls::VideoPlayerControls;
 
+
+#[cfg(test)]
+mod video_player_controls_tests;

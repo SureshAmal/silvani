@@ -25,6 +25,36 @@ impl JikanProvider {
         Self { client }
     }
 
+    pub async fn fetch_episode_titles(
+        &self,
+        mal_id: i64,
+    ) -> Result<std::collections::BTreeMap<u32, String>> {
+        let mut titles = std::collections::BTreeMap::new();
+        let mut page = 1;
+        loop {
+            let response: Value = self
+                .client
+                .get(format!(
+                    "{JIKAN_BASE_URL}/anime/{mal_id}/episodes?page={page}"
+                ))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let entries = parse_episode_titles(&response);
+            let empty = response["data"].as_array().is_none_or(Vec::is_empty);
+            titles.extend(entries);
+            if empty || response["pagination"]["has_next_page"].as_bool() != Some(true) {
+                break;
+            }
+            page += 1;
+            // Stay below both the per-second and per-minute API limits.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        Ok(titles)
+    }
+
     pub fn parse_jikan_item(node: &Value) -> AnimeItem {
         let mal_id = node["mal_id"].as_i64();
         let id = mal_id.map(|id| format!("mal-{}", id)).unwrap_or_default();
@@ -154,5 +184,41 @@ impl JikanProvider {
             upcoming,
             top_rated: top,
         })
+    }
+}
+
+fn parse_episode_titles(response: &Value) -> std::collections::BTreeMap<u32, String> {
+    response["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|episode| {
+            let number = u32::try_from(episode["mal_id"].as_u64()?).ok()?;
+            let title = ["title", "title_romanji", "title_japanese"]
+                .into_iter()
+                .find_map(|field| {
+                    episode[field]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                })?;
+            Some((number, title.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod episode_titles_tests {
+    #[test]
+    fn reads_real_titles_by_episode_number_with_language_fallbacks() {
+        let response = serde_json::json!({"data": [
+            {"mal_id": 1, "title": "A Captain and His Crew"},
+            {"mal_id": 2, "title": null, "title_romanji": "Tabidachi"},
+            {"mal_id": 3, "title": ""},
+        ]});
+        let titles = super::parse_episode_titles(&response);
+        assert_eq!(titles[&1], "A Captain and His Crew");
+        assert_eq!(titles[&2], "Tabidachi");
+        assert!(!titles.contains_key(&3));
     }
 }

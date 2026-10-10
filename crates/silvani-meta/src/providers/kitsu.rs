@@ -210,6 +210,49 @@ impl KitsuProvider {
         Ok(items)
     }
 
+    pub async fn fetch_episode_titles(
+        &self,
+        id: &str,
+    ) -> Result<std::collections::BTreeMap<u32, String>> {
+        let id: u64 = id.strip_prefix("kitsu-").unwrap_or(id).parse()?;
+        let mut offset = 0;
+        let mut titles = std::collections::BTreeMap::new();
+        loop {
+            let response = self
+                .get_json(&format!(
+                    "/anime/{id}/episodes?page[limit]=20&page[offset]={offset}"
+                ))
+                .await?;
+            let count = response["data"].as_array().map_or(0, Vec::len);
+            titles.extend(parse_episode_titles(&response));
+            if count == 0 || response["links"]["next"].as_str().is_none() {
+                break;
+            }
+            offset += count;
+        }
+        Ok(titles)
+    }
+
+    pub async fn resolve_mal_id(&self, id: &str) -> Result<Option<i64>> {
+        let id: u64 = id.strip_prefix("kitsu-").unwrap_or(id).parse()?;
+        let json = self
+            .get_json(&format!("/anime/{id}/mappings?page[limit]=20"))
+            .await?;
+        Ok(json["data"].as_array().and_then(|mappings| {
+            mappings.iter().find_map(|mapping| {
+                let attributes = &mapping["attributes"];
+                if attributes["externalSite"].as_str() != Some("myanimelist/anime") {
+                    return None;
+                }
+                attributes["externalId"]
+                    .as_str()?
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| *id > 0)
+            })
+        }))
+    }
+
     pub async fn fetch_details(&self, id: &str) -> Result<Option<AnimeItem>> {
         let kitsu_id = id.strip_prefix("kitsu-").unwrap_or(id);
         let endpoint = format!("/anime/{}", kitsu_id);
@@ -244,5 +287,46 @@ impl KitsuProvider {
             upcoming,
             top_rated,
         })
+    }
+}
+
+fn parse_episode_titles(response: &Value) -> std::collections::BTreeMap<u32, String> {
+    response["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|episode| {
+            let attributes = &episode["attributes"];
+            let number = u32::try_from(attributes["number"].as_u64()?).ok()?;
+            let placeholder = format!("Episode {number}");
+            let title = [
+                &attributes["titles"]["en_us"],
+                &attributes["titles"]["en"],
+                &attributes["canonicalTitle"],
+            ]
+            .into_iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .find(|title| !title.is_empty() && !title.eq_ignore_ascii_case(&placeholder))?;
+            Some((number, title.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod episode_titles_tests {
+    #[test]
+    fn parses_native_episode_names_and_numbers() {
+        let response = serde_json::json!({"data": [
+            {"attributes": {"number": 1, "canonicalTitle": "Asteroid Blues", "titles": {"en": "Asteroid Blues"}}},
+            {"attributes": {"number": 2, "canonicalTitle": "Stray Dog Strut"}},
+            {"attributes": {"number": 3, "canonicalTitle": "Episode 3"}},
+            {"attributes": {"number": 4, "canonicalTitle": "Gateway Shuffle", "titles": {"en_us": "  ", "en": "Episode 4"}}},
+        ]});
+        let titles = super::parse_episode_titles(&response);
+        assert_eq!(titles[&1], "Asteroid Blues");
+        assert_eq!(titles[&2], "Stray Dog Strut");
+        assert!(!titles.contains_key(&3));
+        assert_eq!(titles[&4], "Gateway Shuffle");
     }
 }

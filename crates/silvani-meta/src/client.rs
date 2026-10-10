@@ -11,6 +11,7 @@ pub struct AnimeMetadataClient {
     kitsu: KitsuProvider,
     jikan: JikanProvider,
     cache: MetaCache,
+    episode_titles_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for AnimeMetadataClient {
@@ -27,6 +28,7 @@ impl AnimeMetadataClient {
             kitsu: KitsuProvider::new(),
             jikan: JikanProvider::new(),
             cache,
+            episode_titles_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -37,6 +39,7 @@ impl AnimeMetadataClient {
             kitsu: KitsuProvider::new(),
             jikan: JikanProvider::new(),
             cache,
+            episode_titles_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -127,11 +130,88 @@ impl AnimeMetadataClient {
         Ok(result)
     }
 
+    /// Resolve by catalog identity, never by a fuzzy anime-title search.
+    pub async fn get_episode_titles(
+        &self,
+        item: &AnimeItem,
+    ) -> Result<std::collections::BTreeMap<u32, String>> {
+        let _guard = self.episode_titles_lock.lock().await;
+        let key = format!("episode-titles-v2:{}", item.id);
+        if let Some(json) = self.cache.get(&key, 86400)
+            && let Ok(titles) = serde_json::from_str(&json)
+        {
+            return Ok(titles);
+        }
+        let mut native_titles = if item.id.starts_with("kitsu-") {
+            self.kitsu
+                .fetch_episode_titles(&item.id)
+                .await
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        if !native_titles.is_empty()
+            && item
+                .episodes
+                .is_none_or(|count| native_titles.len() >= count as usize)
+        {
+            self.cache
+                .set(&key, &serde_json::to_string(&native_titles)?)?;
+            return Ok(native_titles);
+        }
+        let mal_id = if let Some(id) = item.mal_id.filter(|id| *id > 0) {
+            Some(id)
+        } else if item.id.starts_with("kitsu-") {
+            match self.kitsu.resolve_mal_id(&item.id).await {
+                Ok(id) => id,
+                Err(error) if native_titles.is_empty() => return Err(error),
+                Err(_) => None,
+            }
+        } else if let Some(id) = item.id.strip_prefix("mal-") {
+            Some(id.parse::<i64>()?)
+        } else {
+            self.anilist
+                .fetch_details(&item.id)
+                .await?
+                .and_then(|item| item.mal_id)
+        };
+        if let Some(mal_id) = mal_id {
+            match self.jikan.fetch_episode_titles(mal_id).await {
+                Ok(titles) => {
+                    for (number, title) in titles {
+                        native_titles.entry(number).or_insert(title);
+                    }
+                }
+                Err(error) if native_titles.is_empty() => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if !native_titles.is_empty() {
+            self.cache
+                .set(&key, &serde_json::to_string(&native_titles)?)?;
+        }
+        Ok(native_titles)
+    }
+
     pub fn clear_cache(&self) {
         let _ = self.cache.clear();
     }
 
     pub fn delete_cache(&self, key: &str) {
         let _ = self.cache.delete(key);
+    }
+}
+
+#[cfg(test)]
+mod episode_metadata_tests {
+    #[tokio::test]
+    #[ignore = "requires the public episode metadata APIs"]
+    async fn live_episode_titles_resolve_kitsu_identity_and_cache_real_names() {
+        let client = super::AnimeMetadataClient::new().unwrap();
+        let anime = crate::AnimeItem { id: "kitsu-1".into(), ..Default::default() };
+        let titles = client.get_episode_titles(&anime).await.unwrap();
+        assert_eq!(titles.get(&1).map(String::as_str), Some("Asteroid Blues"));
+        assert!(titles.contains_key(&26));
+        assert_eq!(client.get_episode_titles(&anime).await.unwrap(), titles);
     }
 }

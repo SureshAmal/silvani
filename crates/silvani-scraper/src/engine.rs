@@ -276,11 +276,17 @@ impl ScraperEngine {
             .ok_or_else(|| crate::error::ScraperError::NotFound("Provider not found".into()))?;
 
         let prov_key = provider.name();
-        if let Some(cached) = self.cache.get_stream(prov_key, episode_id, &audio, 7200) {
-            return Ok(cached);
+        let mut source = if let Some(cached) = self.cache.get_stream(prov_key, episode_id, &audio, 7200) {
+            cached
+        } else { provider.stream(episode_id, audio).await? };
+        if source.streams.len() == 1 && let Some(master) = source.streams.iter().find(|stream| stream.quality.eq_ignore_ascii_case("auto") && stream.url.contains(".m3u8")) {
+            let http = crate::ScraperHttpClient::new();
+            if let Ok(Ok((url, manifest))) = tokio::time::timeout(Duration::from_secs(3), http.get_html_with_mirrors(&[master.url.clone()], Some(&source.referer))).await {
+                for variant in crate::hls::variants(&url, &manifest) {
+                    if !source.streams.iter().any(|stream| stream.quality == variant.quality) { source.streams.push(variant); }
+                }
+            }
         }
-
-        let source = provider.stream(episode_id, audio).await?;
         let _ = self.cache.set_stream(prov_key, episode_id, &audio, &source);
         Ok(source)
     }
